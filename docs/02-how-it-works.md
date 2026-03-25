@@ -1,1049 +1,891 @@
-# Open Claw (Claude Code) 工作原理文档
+# OpenClaw 工作原理文档
 
 ## 目录
 
 - [1. 总体架构](#1-总体架构)
-- [2. Agentic Loop（智能体循环）](#2-agentic-loop智能体循环)
-- [3. 工具系统 (Tool System)](#3-工具系统-tool-system)
-- [4. 上下文管理 (Context Management)](#4-上下文管理-context-management)
-- [5. 权限系统 (Permission System)](#5-权限系统-permission-system)
-- [6. CLAUDE.md 系统](#6-claudemd-系统)
-- [7. Hook 系统](#7-hook-系统)
-- [8. MCP 集成 (Model Context Protocol)](#8-mcp-集成-model-context-protocol)
-- [9. Agent / Subagent 系统](#9-agent--subagent-系统)
-- [10. 记忆系统 (Memory System)](#10-记忆系统-memory-system)
-- [11. 设置系统 (Settings System)](#11-设置系统-settings-system)
-- [12. Git 集成](#12-git-集成)
-- [13. SDK 与自定义 Agent](#13-sdk-与自定义-agent)
+- [2. Gateway（网关）](#2-gateway网关)
+- [3. Agent 运行时（Pi）](#3-agent-运行时pi)
+- [4. Channel 渠道系统](#4-channel-渠道系统)
+- [5. Session 会话管理](#5-session-会话管理)
+- [6. Tool 工具系统](#6-tool-工具系统)
+- [7. Skill 技能系统](#7-skill-技能系统)
+- [8. 多 Agent 架构](#8-多-agent-架构)
+- [9. 安全与沙箱](#9-安全与沙箱)
+- [10. 配置系统](#10-配置系统)
+- [11. 媒体处理管道](#11-媒体处理管道)
+- [12. 设备节点 (Node)](#12-设备节点-node)
+- [13. 定时任务与 Webhook](#13-定时任务与-webhook)
 - [14. 架构总览图](#14-架构总览图)
 
 ---
 
 ## 1. 总体架构
 
-Open Claw 的核心是一个 **"Agentic Harness"（智能体外壳）**，它将 Claude 语言模型包装在一个可执行环境中。整个架构由以下核心组件构成：
+OpenClaw 采用 **Hub-and-Spoke（中心辐射）** 架构。一个中央 Gateway 进程连接所有组件：
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Claude 语言模型                             │
-│                (Sonnet / Opus / Haiku)                       │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-              ┌────────▼────────┐
-              │  Agentic Loop   │
-              │ 收集上下文→执行→验证│
-              └───┬─────────┬───┘
-                  │         │
-      ┌───────────▼──┐  ┌──▼──────────────┐
-      │   工具系统    │  │   上下文管理     │
-      │ File/Bash/   │  │ 会话状态/        │
-      │ Search/Web/  │  │ CLAUDE.md/       │
-      │ Agent        │  │ 记忆/压缩        │
-      └──────┬───────┘  └────────┬─────────┘
-             │                   │
-      ┌──────▼───────┐   ┌──────▼─────────┐
-      │  权限系统     │   │  执行环境       │
-      │ Deny/Ask/    │   │ 本地/云端/      │
-      │ Allow/Hook   │   │ 远程控制        │
-      └──────────────┘   └──────┬──────────┘
-                                │
-                  ┌─────────────┼─────────────┐
-                  │             │             │
-           ┌──────▼───┐  ┌────▼────┐  ┌────▼─────┐
-           │ MCP 服务器│  │ 子Agent │  │ Hook/   │
-           │ stdio/   │  │ Explore/│  │ Skill/  │
-           │ HTTP/SSE │  │ Plan/   │  │ Plugin  │
-           └──────────┘  │ Custom  │  └──────────┘
-                         └─────────┘
+                        聊天渠道
+                  ┌── WhatsApp (Baileys)
+                  ├── Telegram (grammY)
+                  ├── Discord (discord.js)
+                  ├── Slack (Bolt)
+                  ├── iMessage (BlueBubbles)
+                  ├── ... 21+ 渠道
+                  │
+用户 ──消息──→ [Gateway]  ←──→  [Pi Agent 运行时]
+                  │                    │
+                  ├── Control UI       ├── 工具（Shell/浏览器/文件）
+                  ├── CLI              ├── Skill 系统
+                  ├── macOS App        ├── 模型 API 调用
+                  └── 移动 Node        └── 会话 & 记忆
 ```
 
-**各层职责：**
-
-| 层级 | 职责 |
-|------|------|
-| **语言模型** | 推理、决策、生成代码和计划 |
-| **Agentic Loop** | 协调"收集→执行→验证"循环 |
-| **工具系统** | 提供文件操作、命令执行、搜索等能力 |
-| **上下文管理** | 管理会话状态、对话历史、自动压缩 |
-| **权限系统** | 细粒度的访问控制和安全防护 |
-| **执行环境** | 本地机器、云端 VM、远程控制等运行环境 |
-| **扩展层** | MCP 服务器、子 Agent、Hook、Skill、Plugin |
+**核心原则：一切都在本地运行。** Gateway 进程是唯一的协调中心，AI 模型调用通过 API 发往云端，但所有数据和执行都在你的机器上。
 
 ---
 
-## 2. Agentic Loop（智能体循环）
+## 2. Gateway（网关）
 
-Agentic Loop 是 Open Claw 的核心运行机制，每次接收到用户请求后，Claude 进入一个三阶段循环，直到任务完成：
+Gateway 是 OpenClaw 的核心进程，负责协调所有组件。
 
-### 2.1 阶段一：收集上下文 (Gather Context)
+### 2.1 职责
 
-Claude 首先理解当前项目状态：
+| 职责 | 说明 |
+|------|------|
+| **WebSocket 控制面板** | 绑定 `ws://127.0.0.1:18789`，作为所有客户端的连接入口 |
+| **渠道管理** | 启动/停止/监控各聊天渠道的连接 |
+| **消息路由** | 将入站消息路由到正确的 Agent |
+| **会话管理** | 创建、隔离、回收会话 |
+| **健康监控** | 定期检查渠道状态，自动重启异常渠道 |
+| **配置热重载** | 大部分配置修改无需重启即可生效 |
+| **Control UI 服务** | 直接提供浏览器管理界面 |
+
+### 2.2 生命周期
 
 ```
-用户请求
-   │
-   ▼
+启动流程：
+1. 读取 ~/.openclaw/openclaw.json 配置
+2. 校验配置（严格模式，未知字段会阻止启动）
+3. 启动 WebSocket 服务器 (端口 18789)
+4. 初始化 Agent 运行时
+5. 连接各聊天渠道
+6. 启动健康监控
+7. 启动 Skill 观察器
+
+运行时：
+- 接收消息 → 路由 → Agent 处理 → 回复
+- 热重载配置变更
+- 健康检查 & 自动恢复
+```
+
+### 2.3 热重载
+
+Gateway 支持 `hybrid` 模式（默认），区分需要/不需要重启的配置：
+
+**无需重启（热应用）：**
+- 渠道配置（channels）
+- Agent 配置（agents）
+- 模型配置（models）
+- Hook 和 Cron
+- 会话、工具、UI、日志
+
+**需要重启：**
+- `gateway.*`（端口、绑定、认证、TLS）
+- 基础设施设置
+- Plugin 配置
+
+```
+配置项：
+gateway.reload.mode: hybrid | hot | restart | off
+gateway.reload.debounceMs: 防抖时间
+```
+
+### 2.4 健康监控
+
+```
+gateway.channelHealthCheckMinutes: 检查间隔（0 禁用）
+gateway.channelStaleEventThresholdMinutes: 陈旧阈值
+gateway.channelMaxRestartsPerHour: 每小时最大重启次数
+channels.<provider>.healthMonitor.enabled: 按渠道覆盖
+```
+
+当渠道长时间未收到事件时，Gateway 自动重启该渠道连接。
+
+---
+
+## 3. Agent 运行时（Pi）
+
+Agent 运行时是 OpenClaw 的"大脑"，负责 AI 推理和任务执行。
+
+### 3.1 工作流程
+
+```
+消息到达
+    │
+    ▼
 ┌─────────────────────┐
-│ 1. 读取相关文件      │ ← Read / Glob / Grep 工具
-│ 2. 执行探索命令      │ ← Bash 工具（如 git status, ls）
-│ 3. 加载 CLAUDE.md   │ ← 项目配置和规则
-│ 4. 加载自动记忆      │ ← MEMORY.md
-│ 5. 使用 Explore Agent│ ← 深度代码探索
+│  1. 解析消息         │ ← 提取文本、媒体、上下文
+│  2. 加载会话上下文    │ ← 恢复历史对话
+│  3. 注入 Skill 定义  │ ← 构建系统提示词
+│  4. 调用 AI 模型     │ ← 通过 API 发送请求
+│  5. 解析模型响应      │ ← 文本 / 工具调用
+│  6. 执行工具调用      │ ← Shell / 文件 / 浏览器
+│  7. 循环直到完成      │ ← 多轮工具调用
+│  8. 返回最终回复      │ ← 通过渠道发回用户
+└─────────────────────┘
+```
+
+### 3.2 RPC 模式
+
+Agent 运行时通过 RPC（远程过程调用）与 Gateway 通信，支持工具调用和流式响应。这种设计使 Agent 可以独立升级和替换。
+
+### 3.3 模型调用
+
+```
+模型格式：提供商/模型名
+示例：anthropic/claude-sonnet-4-6
+
+支持 35+ 提供商：
+- 云端：Anthropic、OpenAI、Google、Azure、AWS Bedrock
+- 本地：Ollama、vLLM、SGLang
+- 认证：OAuth 订阅或 API Key
+- 降级：主模型不可用时自动切换到 fallback 模型
+```
+
+### 3.4 流式响应与分块
+
+对于长回复，Agent 支持流式输出和分块发送，避免用户等待过长时间。每个渠道可配置不同的分块策略。
+
+---
+
+## 4. Channel 渠道系统
+
+渠道是 OpenClaw 与用户之间的通信桥梁。
+
+### 4.1 支持的渠道
+
+| 渠道 | 底层库 | 说明 |
+|------|--------|------|
+| WhatsApp | Baileys | 扫码配对，最流行的渠道 |
+| Telegram | grammY | 通过 BotFather 创建 Bot |
+| Discord | discord.js | 支持服务器、线程、多账户 |
+| Slack | Bolt | 工作区集成 |
+| iMessage | BlueBubbles | 需要 macOS + BlueBubbles 服务 |
+| Signal | - | 加密通信 |
+| Google Chat | - | 企业集成 |
+| Microsoft Teams | - | 企业集成 |
+| Matrix | - | 去中心化协议 |
+| IRC | - | 传统 IRC 协议 |
+| Mattermost | Plugin | 自建团队通信 |
+| Feishu（飞书） | - | 国内企业通信 |
+| LINE | - | 亚洲地区流行 |
+| Twitch | Plugin | 直播聊天 |
+| Nostr | - | 去中心化社交 |
+| WebChat | 内置 | Control UI 中的聊天界面 |
+
+### 4.2 渠道架构
+
+```
+用户消息
+    │
+    ▼
+┌─────────────────────┐
+│  Channel Adapter     │  ← 每个渠道一个适配器
+│  - 认证 & 连接管理   │
+│  - 消息格式转换      │
+│  - 媒体处理          │
+│  - DM / 群聊区分     │
+│  - 提及检测          │
 └─────────┬───────────┘
-          │
-          ▼
-     已理解上下文
-```
-
-### 2.2 阶段二：执行操作 (Take Action)
-
-基于收集到的上下文，Claude 选择并执行操作：
-
-```
-     已理解上下文
-          │
+          │ 标准化消息
           ▼
 ┌─────────────────────┐
-│ 1. 选择合适的工具    │ ← 模型推理
-│ 2. 权限检查         │ ← 权限系统评估
-│ 3. PreToolUse Hook  │ ← 可拦截或修改
-│ 4. 执行工具         │ ← 实际操作
-│ 5. PostToolUse Hook │ ← 后处理
-│ 6. 收集工具输出      │ ← 结果反馈
-└─────────┬───────────┘
-          │
-          ▼
-     操作已执行
+│  Message Router      │  ← Gateway 核心
+│  - 路由到正确 Agent   │
+│  - 会话查找/创建     │
+│  - 安全策略检查      │
+└─────────────────────┘
 ```
 
-### 2.3 阶段三：验证结果 (Verify Results)
+### 4.3 多账户支持
 
-Claude 评估操作结果，决定下一步：
+同一渠道可以绑定多个账户（如多个 WhatsApp 号码、多个 Telegram Bot），通过 `accountId` 区分，路由到不同的 Agent。
 
-```
-     操作已执行
-          │
-          ▼
-┌──────────────────────┐
-│ 1. 分析工具输出       │
-│ 2. 运行测试/检查      │
-│ 3. 对比预期结果       │
-│ 4. 判断是否完成       │
-└─────┬──────────┬─────┘
-      │          │
-   完成？      未完成
-      │          │
-      ▼          ▼
-  返回结果    回到阶段一
-```
+### 4.4 群聊提及门控
 
-### 2.4 循环中断
-
-用户可以在任何时刻按 `Ctrl+C` 中断循环，提供新的上下文或修改方向。
-
----
-
-## 3. 工具系统 (Tool System)
-
-工具是 Open Claw 的"手和脚"，让 Claude 能够在真实环境中执行操作。
-
-### 3.1 工具分类
-
-| 类别 | 工具 | 说明 |
-|------|------|------|
-| **文件操作** | `Read` | 读取文件内容（支持代码、图片、PDF、Jupyter Notebook） |
-| | `Write` | 创建新文件或完全重写文件 |
-| | `Edit` | 编辑现有文件（只发送 diff） |
-| | `NotebookEdit` | 编辑 Jupyter Notebook 单元格 |
-| **搜索** | `Glob` | 按文件名模式匹配（如 `**/*.ts`） |
-| | `Grep` | 按内容搜索文件（底层使用 ripgrep） |
-| **执行** | `Bash` | 执行 shell 命令，工作目录在命令间保持 |
-| **网络** | `WebFetch` | 获取网页内容 |
-| | `WebSearch` | 搜索互联网 |
-| **编排** | `Agent` | 启动子 Agent 处理复杂任务 |
-| | `Skill` | 调用 Skill（技能） |
-| | `TaskCreate/List/Update` | 创建和管理任务列表 |
-| **用户交互** | `AskUserQuestion` | 向用户提问 |
-| **调度** | `CronCreate/Delete/List` | 创建定时任务 |
-| **模式切换** | `EnterPlanMode/ExitPlanMode` | 进入/退出规划模式 |
-| **工作树** | `EnterWorktree/ExitWorktree` | 进入/退出 git 工作树隔离环境 |
-
-### 3.2 工具执行流程
-
-每次工具调用都经历以下完整流程：
-
-```
-Claude 生成工具调用请求
-         │
-         ▼
-┌──────────────────┐
-│  1. 权限检查      │ ← deny > ask > allow 优先级
-│     ↓ 通过       │
-│  2. PreToolUse   │ ← Hook 可以拦截（exit 2）或允许（exit 0）
-│     Hook 执行    │
-│     ↓ 通过       │
-│  3. 工具实际执行  │ ← 在对应环境中运行
-│     ↓            │
-│  4. PostToolUse  │ ← Hook 后处理
-│     Hook 执行    │
-│     ↓            │
-│  5. 结果返回     │ ← 输出注入到 Claude 的上下文中
-└──────────────────┘
-```
-
-### 3.3 各工具详解
-
-#### Read 工具
-
-```
-功能：读取文件内容
-输入：file_path（绝对路径）、offset（起始行）、limit（行数）、pages（PDF 页范围）
-特点：
-  - 使用 cat -n 格式输出（带行号）
-  - 支持图片（PNG/JPG 等，多模态解析）
-  - 支持 PDF（大文件需指定页范围，每次最多 20 页）
-  - 支持 Jupyter Notebook（返回所有单元格及输出）
-  - 默认读取前 2000 行
-```
-
-#### Write 工具
-
-```
-功能：创建新文件或完全重写现有文件
-输入：file_path（绝对路径）、content（文件内容）
-安全约束：
-  - 写入现有文件前必须先用 Read 读取
-  - 覆盖前会确认
-```
-
-#### Edit 工具
-
-```
-功能：编辑现有文件（增量修改）
-输入：file_path、old_string（要替换的文本）、new_string（替换后的文本）
-特点：
-  - 只发送差异部分，效率高
-  - 适合小范围修改
-  - 比 Write 更精确，更安全
-```
-
-#### Bash 工具
-
-```
-功能：执行 shell 命令
-输入：command（命令字符串）、timeout（超时，最大 600000ms）、run_in_background（后台运行）
-特点：
-  - 工作目录在命令间保持
-  - 环境变量不跨命令保持
-  - 每个命令在独立进程中运行
-  - 支持后台运行（run_in_background: true）
-  - 支持沙箱模式限制文件系统和网络访问
-```
-
-#### Glob 工具
-
-```
-功能：按文件名模式快速搜索
-输入：pattern（glob 模式，如 "**/*.ts"）、path（搜索目录）
-特点：
-  - 支持任意大小的代码库
-  - 返回按修改时间排序的文件路径列表
-```
-
-#### Grep 工具
-
-```
-功能：按内容搜索文件
-输入：pattern（搜索模式）、path（搜索目录）、include（文件过滤）
-底层：使用 ripgrep 引擎，速度极快
-```
-
-#### Agent 工具
-
-```
-功能：启动子 Agent 处理复杂任务
-输入：prompt（任务描述）、subagent_type（Agent 类型）、isolation（隔离模式）
-类型：
-  - Explore：快速代码库搜索（使用 Haiku 模型）
-  - Plan：方案设计和架构规划
-  - general-purpose：通用多步骤任务
-  - 自定义 Agent
-隔离：
-  - 默认：共享文件系统
-  - worktree：独立 git 工作树
-```
-
-#### WebFetch 工具
-
-```
-功能：获取网页内容
-输入：url（目标 URL）
-限制：受权限系统中的域名白名单控制
-```
-
-#### WebSearch 工具
-
-```
-功能：搜索互联网
-输入：query（搜索查询）
-用途：查找最新文档、解决方案、API 参考等
-```
-
----
-
-## 4. 上下文管理 (Context Management)
-
-### 4.1 上下文窗口结构
-
-Claude 的上下文窗口是有限的（目前最大 1M token），Open Claw 按以下层级组织内容：
-
-```
-上下文窗口 (Context Window)
-├── 系统提示词 (System Prompt)        ← 固定，定义 Claude 的行为
-├── CLAUDE.md 文件内容                ← 会话开始时完整加载
-├── 自动记忆 MEMORY.md               ← 加载前 200 行
-├── .claude/rules/ 规则文件           ← 按条件加载
-├── 活跃 MCP 服务器的工具定义         ← 占用上下文空间
-├── 对话历史                         ← 最新的优先保留
-├── 工具调用结果                      ← 保留到压缩时清理
-└── Skill 内容                       ← 按需加载
-```
-
-### 4.2 上下文压缩策略
-
-当上下文使用量达到约 95% 时，Open Claw 自动触发压缩：
-
-```
-压缩流程：
-1. 优先清理最旧的工具输出（测试结果、命令输出等）
-2. 如果仍然超限，对对话历史进行摘要
-3. 保留用户请求和关键代码片段
-4. 重新注入 CLAUDE.md（压缩后重新加载）
-5. 重新注入自动记忆 MEMORY.md 前 200 行
-6. 从 CLAUDE_ENV_FILE 恢复环境变量
-```
-
-**手动触发压缩：**
-
-```bash
-/compact                      # 基本压缩
-/compact 聚焦在认证模块       # 带聚焦主题的压缩
-```
-
-### 4.3 管理上下文的最佳实践
-
-| 策略 | 说明 |
-|------|------|
-| 使用 `/compact` | 主动释放空间 |
-| 使用子 Agent | 隔离大量输出（如测试结果）到独立上下文 |
-| 拆分 CLAUDE.md | 将大文件拆分到 `.claude/rules/` 按路径加载 |
-| Skill 按需加载 | 将大量参考内容放入 Skill，仅在需要时加载 |
-| `/clear` 重置 | 任务完成后清理上下文开始新任务 |
-
----
-
-## 5. 权限系统 (Permission System)
-
-### 5.1 分层评估架构
-
-权限系统采用三级评估，按优先级从高到低：
-
-```
-┌──────────────────────────────────┐
-│  Deny 规则（最高优先级）           │  ← 无条件拒绝
-├──────────────────────────────────┤
-│  Ask 规则                        │  ← 弹出提示让用户决定
-├──────────────────────────────────┤
-│  Allow 规则（最低优先级）          │  ← 自动批准
-└──────────────────────────────────┘
-```
-
-### 5.2 配置作用域层级
-
-```
-优先级从高到低：
-1. Managed Settings（组织管理员设置，不可覆盖）
-2. CLI 参数（如 --allowedTools，会话级）
-3. Local Settings (.claude/settings.local.json，本机专用)
-4. Project Settings (.claude/settings.json，团队共享)
-5. User Settings (~/.claude/settings.json，个人默认)
-```
-
-### 5.3 工具级权限规则语法
-
-**Bash 工具：** 通配符模式，支持词边界
-
-```json
+```json5
 {
-  "allow": [
-    "Bash(npm run test)",       // 精确匹配
-    "Bash(npm run *)",          // * 前有空格 → 词边界匹配
-    "Bash(npm*)"                // * 前无空格 → npm 后接任意字符
-  ],
-  "deny": [
-    "Bash(rm -rf *)",
-    "Bash(git push --force *)",
-    "Bash(git * main)"          // 拒绝所有针对 main 分支的 git 操作
-  ]
-}
-```
-
-**Read/Edit/Write 工具：** Gitignore 风格的路径模式
-
-```json
-{
-  "allow": [
-    "Read",                      // 允许读取所有文件
-    "Edit(src/**/*.ts)",         // 允许编辑 src 下的 TS 文件
-    "Write(~/docs/**)"           // 允许写入 home 下的 docs 目录
-  ],
-  "deny": [
-    "Read(.env*)",               // 禁止读取环境变量文件
-    "Edit(//etc/**)"             // 禁止编辑 /etc 下的系统文件
-  ]
-}
-```
-
-**WebFetch 工具：** 域名规则
-
-```json
-{
-  "allow": ["WebFetch(domain:docs.example.com)"],
-  "deny": ["WebFetch(domain:internal.corp.com)"]
-}
-```
-
-**MCP 工具：** 服务器和工具名匹配
-
-```json
-{
-  "allow": [
-    "mcp__github__search_repositories",  // 允许特定工具
-    "mcp__slack__*"                       // 允许 Slack 服务器的所有工具
-  ]
-}
-```
-
-### 5.4 权限模式详解
-
-| 模式 | 读文件 | 写文件 | Shell 命令 | 网络请求 | 安全机制 |
-|------|--------|--------|-----------|---------|---------|
-| `default` | 自动 | 询问 | 询问 | 询问 | 标准 |
-| `acceptEdits` | 自动 | 自动 | 询问 | 询问 | 信任文件编辑 |
-| `plan` | 自动 | 禁止 | 只读命令 | 禁止 | 完全只读 |
-| `auto` | 自动 | 自动 | 自动 | 自动 | 后台分类器审查 |
-| `bypassPermissions` | 自动 | 自动 | 自动 | 自动 | 无（仅 .git/.claude 保护） |
-
-### 5.5 Hook 参与权限评估
-
-PreToolUse Hook 可以参与权限决策：
-
-```
-Hook 退出码：
-  exit 0  → 允许（仍受 deny 规则约束）
-  exit 2  → 拦截（优先于 allow 规则）
-
-结构化输出（JSON）：
-  { "permissionDecision": "allow" }  → 允许
-  { "permissionDecision": "deny" }   → 拒绝
-  { "permissionDecision": "ask" }    → 交给用户决定
-```
-
----
-
-## 6. CLAUDE.md 系统
-
-### 6.1 加载顺序
-
-```
-会话启动时的加载流程：
-
-1. 组织级 CLAUDE.md（不可排除）
-   ├── macOS: /Library/Application Support/ClaudeCode/CLAUDE.md
-   ├── Linux/WSL: /etc/claude-code/CLAUDE.md
-   └── Windows: C:\Program Files\ClaudeCode\CLAUDE.md
-
-2. 从当前目录向上遍历
-   ├── ./CLAUDE.md 或 ./.claude/CLAUDE.md    ← 完整加载
-   ├── ../CLAUDE.md                           ← 完整加载
-   └── 继续向上直到项目根目录
-
-3. 嵌套 CLAUDE.md（懒加载）
-   └── 当 Claude 读取子目录中的文件时才加载
-
-4. 用户级 CLAUDE.md
-   └── ~/.claude/CLAUDE.md
-
-5. 项目规则
-   └── .claude/rules/*.md
-       ├── 无路径限制 → 无条件加载
-       └── 有 paths 字段 → 匹配时才加载
-```
-
-### 6.2 CLAUDE.md 中的特殊语法
-
-**文件导入：**
-
-```markdown
-@path/to/other-file.md
-```
-
-引用其他文件的内容，适合将大型配置拆分管理。
-
-**路径条件规则（.claude/rules/ 中）：**
-
-```yaml
----
-paths:
-  - "src/api/**/*.ts"
-  - "src/**/*.{ts,tsx}"
----
-# 此规则仅在 Claude 处理匹配路径的文件时加载
-```
-
-### 6.3 CLAUDE.md 在压缩中的行为
-
-- CLAUDE.md 内容在上下文压缩后会**重新加载**
-- 这确保了项目指令始终可用
-- 因此 CLAUDE.md 应保持简洁（建议 < 200 行/文件）
-
----
-
-## 7. Hook 系统
-
-Hook 是 Open Claw 的生命周期自动化机制，允许你在特定事件发生时执行自定义逻辑。
-
-### 7.1 Hook 事件全览
-
-| 事件类别 | 事件名 | 触发时机 |
-|---------|--------|---------|
-| **会话事件** | `SessionStart` | 启动、恢复、清除、压缩时 |
-| | `InstructionsLoaded` | CLAUDE.md/rules 加载时 |
-| | `SessionEnd` | 会话结束时 |
-| **工具事件** | `PreToolUse` | 工具执行前（可拦截/修改） |
-| | `PostToolUse` | 工具执行后（可拦截并反馈） |
-| | `PostToolUseFailure` | 工具执行失败后（仅通知） |
-| **权限事件** | `PermissionRequest` | 权限请求时（可自动决策） |
-| | `Notification` | 权限提示、空闲提示等 |
-| **Agent 事件** | `SubagentStart` | 子 Agent 启动时 |
-| | `SubagentStop` | 子 Agent 停止时 |
-| | `Stop` | Agent 完成一轮时 |
-| **上下文事件** | `PreCompact` | 上下文压缩前 |
-| | `PostCompact` | 上下文压缩后 |
-| **协作事件** | `TeammateIdle` | Agent 团队中有成员空闲 |
-| | `TaskCompleted` | 任务完成时 |
-| **基础设施** | `WorktreeCreate` | 工作树创建时 |
-| | `WorktreeRemove` | 工作树移除时 |
-
-### 7.2 Hook 输入输出格式
-
-**输入（通过 stdin 传入 JSON）：**
-
-```json
-{
-  "session_id": "abc123",
-  "transcript_path": "/path/to/transcript.jsonl",
-  "cwd": "/current/dir",
-  "hook_event_name": "PreToolUse",
-  "tool_name": "Bash",
-  "tool_input": { "command": "npm test" },
-  "permission_mode": "default"
-}
-```
-
-**输出（退出码含义）：**
-
-| 退出码 | 含义 |
-|--------|------|
-| `0` | 成功（可通过 stdout 返回 JSON 进行结构化控制） |
-| `2` | 拦截操作（stderr 的内容作为反馈传给 Claude） |
-| 其他 | 非阻塞错误（仅在 verbose 模式下显示） |
-
-### 7.3 Hook 类型
-
-| 类型 | 说明 |
-|------|------|
-| `command` | 执行 shell 脚本（stdio 通信） |
-| `http` | 调用远程 HTTP 端点（POST JSON） |
-| `prompt` | 单轮 LLM 评估（默认使用 Haiku） |
-| `agent` | 多轮子 Agent（60 秒超时） |
-
-### 7.4 配置示例
-
-在 `.claude/settings.json` 中配置：
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./scripts/validate-command.sh"
-          }
-        ]
+  agents: {
+    "my-agent": {
+      groupChat: {
+        mentionPatterns: ["@openclaw", "openclaw"]
       }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "prettier --write $FILE_PATH"
-          }
-        ]
+    }
+  },
+  channels: {
+    telegram: {
+      groups: {
+        "*": { requireMention: true }
       }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "startup",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo '欢迎回来！' >&2"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### 7.5 Hook 配置位置
-
-| 位置 | 作用域 |
-|------|--------|
-| `~/.claude/settings.json` | 用户级（所有项目） |
-| `.claude/settings.json` | 项目级（团队共享） |
-| `.claude/settings.local.json` | 本机专用（不提交到 git） |
-| Skill/Agent 的 frontmatter | 仅在该 Skill/Agent 激活时 |
-| Plugin 的 `hooks/hooks.json` | 仅在该 Plugin 启用时 |
-
----
-
-## 8. MCP 集成 (Model Context Protocol)
-
-### 8.1 MCP 架构
-
-MCP 是一个开放标准协议，让 AI 工具能够连接外部数据源和服务。
-
-```
-Open Claw
-├── MCP 连接管理器
-│   ├── Stdio 服务器（本地进程）
-│   ├── HTTP 服务器（远程端点）
-│   └── SSE 服务器（已废弃，流式传输）
-└── 工具适配器
-    └── 将 MCP 工具转换为 Open Claw 工具
-        格式：mcp__<服务器名>__<工具名>
-```
-
-### 8.2 服务器生命周期
-
-```
-1. 配置      → 存储在 .mcp.json / settings.json / managed-mcp.json
-2. 启动      → 会话开始时连接（或 Plugin 启用时）
-3. 工具发现  → 通过 list_tools JSON-RPC 调用发现可用工具
-4. 动态更新  → list_changed 通知触发工具刷新
-5. 关闭      → 会话结束时断开连接
-```
-
-### 8.3 传输类型
-
-| 类型 | 说明 | 适用场景 |
-|------|------|----------|
-| **stdio** | 本地进程通信 | 本地脚本、npx 命令、Python 脚本 |
-| **HTTP** | JSON-RPC over HTTP | 远程服务端点 |
-| **SSE** | Server-Sent Events（已废弃） | 旧版流式服务 |
-
-### 8.4 工具命名规则
-
-MCP 工具在 Open Claw 中以统一格式出现：
-
-```
-mcp__<服务器名>__<工具名>
-
-示例：
-  mcp__github__search_repositories
-  mcp__slack__send_message
-  mcp__postgres__query
-```
-
-权限匹配支持通配符：`mcp__github__*`
-
-### 8.5 上下文开销
-
-每个 MCP 服务器的工具定义都会加载到每次请求中，多个服务器可能在工作开始前就消耗大量上下文空间。使用 `/mcp` 命令查看每个服务器的上下文开销。
-
----
-
-## 9. Agent / Subagent 系统
-
-### 9.1 子 Agent 架构
-
-```
-主会话 (Main Session)
-├── 子 Agent 实例 1 (Explore)
-│   ├── 独立上下文窗口
-│   ├── 受限工具集（只读）
-│   └── 使用 Haiku 模型（快速）
-│
-├── 子 Agent 实例 2 (自定义 reviewer)
-│   ├── 自定义系统提示
-│   ├── 受限工具集
-│   └── 可选持久化记忆
-│
-└── 工作树子 Agent (isolation: worktree)
-    ├── 独立 git 工作树
-    └── 隔离的文件系统状态
-```
-
-### 9.2 内置子 Agent 类型
-
-| 子 Agent | 模型 | 工具权限 | 用途 |
-|---------|------|---------|------|
-| **Explore** | Haiku | 只读（Read/Glob/Grep 等） | 快速代码库搜索和分析 |
-| **Plan** | 继承主会话 | 只读 | 方案设计和架构规划 |
-| **general-purpose** | 继承主会话 | 全部工具 | 复杂多步骤任务 |
-
-### 9.3 自定义子 Agent
-
-在 `.claude/agents/` 目录下创建 Agent 定义文件：
-
-```yaml
-# .claude/agents/code-reviewer.md
----
-name: code-reviewer
-description: 审查代码质量问题
-tools: Read, Grep, Glob, Bash
-model: sonnet
-memory: project
-permissionMode: acceptEdits
-maxTurns: 20
-isolation: default
----
-你是一个代码审查专家。分析代码并提出改进建议。
-
-## 审查重点
-1. 代码可读性
-2. 潜在 Bug
-3. 性能问题
-4. 安全漏洞
-```
-
-### 9.4 子 Agent 生命周期
-
-```
-1. 调用     → Claude 自动委派或用户手动触发
-2. 启动     → 子 Agent 以独立上下文窗口启动
-3. 隔离     → 输出不会膨胀主会话的上下文
-4. 执行     → 使用配置的工具集独立工作
-5. 摘要     → 将结果摘要返回主会话
-6. 清理     → 30 天后自动清理 Transcript
-```
-
-### 9.5 上下文隔离的好处
-
-| 优势 | 说明 |
-|------|------|
-| 输出隔离 | 测试结果等大量输出留在子 Agent 内 |
-| 探索分离 | 代码搜索与实现逻辑分离 |
-| 独立容量 | 每个子 Agent 获得全新的上下文空间 |
-| 主会话专注 | 主对话保持简洁，只包含摘要 |
-
-### 9.6 工作树隔离模式
-
-设置 `isolation: worktree` 可以：
-
-- 自动创建临时 git 工作树
-- 给子 Agent 提供独立的文件系统
-- 如果无更改则自动清理
-- 防止文件冲突（多个 Agent 同时修改代码时）
-
-### 9.7 Agent 持久化与恢复
-
-- Transcript 存储在：`~/.claude/projects/<项目>/<sessionId>/subagents/`
-- 可通过 `SendMessage` 工具发送消息恢复已有 Agent
-- Agent 停止后收到消息可自动恢复
-- 完整对话历史保留
-
----
-
-## 10. 记忆系统 (Memory System)
-
-### 10.1 双重记忆架构
-
-Open Claw 有两套互补的记忆机制：
-
-| 方面 | CLAUDE.md（手动记忆） | Auto Memory（自动记忆） |
-|------|----------------------|----------------------|
-| **写入者** | 用户 | Claude |
-| **存储位置** | 项目代码库（提交到 git） | `~/.claude/projects/<项目>/memory/` |
-| **作用域** | 项目/用户/组织 | 项目特定（按 git 仓库） |
-| **加载方式** | 会话开始时完整加载 | MEMORY.md 前 200 行 |
-| **格式** | Markdown 指令 | Markdown 笔记 + 主题文件 |
-| **生命周期** | 手动维护 | 自动积累 |
-
-### 10.2 自动记忆的文件结构
-
-```
-~/.claude/projects/<项目>/memory/
-├── MEMORY.md           ← 索引文件，前 200 行每次加载
-├── debugging.md        ← 主题文件，按需懒加载
-├── api-conventions.md  ← 主题文件
-└── architecture.md     ← 主题文件
-```
-
-每个主题文件使用 frontmatter 格式：
-
-```yaml
----
-name: 记忆名称
-description: 一行描述（用于判断是否相关）
-type: user|feedback|project|reference
----
-
-记忆内容...
-```
-
-### 10.3 记忆类型
-
-| 类型 | 用途 | 示例 |
-|------|------|------|
-| `user` | 用户角色、偏好、技能 | "用户是高级后端工程师，熟悉 Go" |
-| `feedback` | 用户的工作方式偏好 | "不要在回复末尾总结刚做的事情" |
-| `project` | 项目动态、决策 | "3月5日起冻结非关键 PR" |
-| `reference` | 外部资源指针 | "Pipeline Bug 在 Linear INGEST 项目中跟踪" |
-
-### 10.4 子 Agent 持久记忆
-
-子 Agent 可以维护独立的记忆目录：
-
-| 记忆作用域 | 存储位置 |
-|-----------|----------|
-| `memory: user` | `~/.claude/agent-memory/<agent-name>/` |
-| `memory: project` | `.claude/agent-memory/<agent-name>/` |
-| `memory: local` | `.claude/agent-memory-local/<agent-name>/` |
-
----
-
-## 11. 设置系统 (Settings System)
-
-### 11.1 设置优先级层级
-
-```
-优先级从高到低：
-
-1. Managed Settings（企业管理设置）
-   ├── 服务器管理（Anthropic 服务器下发）
-   ├── 文件管理（managed-settings.json / managed-mcp.json）
-   └── OS 级（macOS plist / Windows 注册表）
-
-2. CLI 参数
-   └── --model, --allowedTools 等（仅当前会话）
-
-3. Local Project Settings
-   └── .claude/settings.local.json（本机专用，gitignored）
-
-4. Project Settings
-   └── .claude/settings.json（团队共享，提交到 git）
-
-5. User Settings
-   └── ~/.claude/settings.json（个人默认，所有项目）
-```
-
-### 11.2 设置文件结构
-
-```json
-{
-  "model": "sonnet",
-  "defaultMode": "default",
-  "autoMemoryEnabled": true,
-
-  "permissions": {
-    "defaultMode": "acceptEdits",
-    "allow": ["Bash(npm run test)", "Read", "Grep"],
-    "deny": ["Bash(rm -rf *)"],
-    "ask": ["Bash(*)"]
-  },
-
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          { "type": "command", "command": "./validate.sh" }
-        ]
-      }
-    ]
-  },
-
-  "env": {
-    "NODE_ENV": "production"
-  },
-
-  "mcpServers": {
-    "github": { "type": "http", "url": "..." }
-  },
-
-  "sandbox": {
-    "enabled": true,
-    "network": {
-      "allowedDomains": ["github.com", "*.internal.example.com"]
     }
   }
 }
 ```
 
-### 11.3 关键配置字段
-
-| 字段 | 说明 |
-|------|------|
-| `model` | 模型别名（sonnet/opus/haiku）或完整 ID |
-| `defaultMode` | 默认权限模式 |
-| `autoMemoryEnabled` | 是否启用自动记忆 |
-| `agent` | 默认子 Agent |
-| `effort` | 推理强度（low/medium/high/max） |
-| `claudeMdExcludes` | 排除特定 CLAUDE.md 的 glob 模式 |
-| `sandbox.enabled` | 是否启用 OS 级文件系统/网络沙箱 |
-| `additionalDirectories` | 扩展文件访问范围 |
-| `disableAllHooks` | 一键禁用所有 Hook |
+只有被 @提及时，Bot 才会在群聊中响应。
 
 ---
 
-## 12. Git 集成
+## 5. Session 会话管理
 
-### 12.1 自动读取的 Git 状态
+会话是 Agent 维护对话上下文的基本单位。
 
-Open Claw 在会话开始时自动读取：
+### 5.1 会话模型
 
-- 当前分支名
-- 未提交的更改（已跟踪和未跟踪文件）
-- 最近的提交历史
-- 主分支信息（用于 PR）
-- Git 配置
+```
+会话存储：~/.openclaw/agents/<agentId>/sessions/*.jsonl
 
-### 12.2 Git 工作树集成
-
-工作树用于并行会话和隔离执行：
-
-```bash
-# 手动创建工作树
-git worktree add ../branch-name branch-name
-cd ../branch-name
-claude
-
-# 子 Agent 自动工作树（isolation: worktree）
-# 在 Agent 定义中设置，自动创建和清理
+会话类型：
+- main：DM 的默认会话（所有 DM 共享）
+- per-peer：每个发送者独立会话
+- per-channel-peer：每个发送者+渠道组合独立会话
+- 群聊会话：每个群/频道独立
 ```
 
-**工作树清理：**
-- `WorktreeRemove` Hook 在会话退出时触发
-- 子 Agent 无更改时自动清理
-- 手动清理：`git worktree remove <path>`
+### 5.2 会话隔离策略
 
-### 12.3 安全约束
+通过 `session.dmScope` 控制 DM 会话的隔离程度：
 
-Open Claw 在 Git 操作中遵循严格的安全准则：
+| 模式 | 说明 |
+|------|------|
+| `main` | 所有 DM 共享一个会话（默认，保持连续性） |
+| `per-peer` | 每个发送者独立会话 |
+| `per-channel-peer` | 每个发送者+渠道组合独立 |
+| `per-account-channel-peer` | 多账户完全隔离 |
 
-- 不自动修改 git 配置
-- 不执行破坏性 git 命令（除非用户明确要求）
-- 不跳过 Hook（--no-verify）
-- 不强制推送到 main/master
-- 优先创建新 commit 而非 amend
-- 暂存时指定文件名，避免 `git add -A`
+### 5.3 会话重置
+
+```json5
+{
+  session: {
+    reset: {
+      mode: "daily",         // 每日重置
+      atHour: 3,             // 凌晨 3 点
+      // 或者
+      mode: "idle-based",
+      idleMinutes: 60        // 空闲 60 分钟后重置
+    }
+  }
+}
+```
+
+用户也可以在聊天中手动 `/reset` 或 `/new`。
+
+### 5.4 会话间通信
+
+Agent 可以跨会话交互：
+
+```
+tools:
+- sessions_list    → 发现活跃会话
+- sessions_history → 获取其他会话的历史记录
+- sessions_send    → 向其他会话发送消息
+```
 
 ---
 
-## 13. SDK 与自定义 Agent
+## 6. Tool 工具系统
 
-### 13.1 可用 SDK
+工具是 Agent 与外部世界交互的能力。
 
-| SDK | 语言 | 状态 |
-|-----|------|------|
-| Python SDK | Python | 稳定 |
-| TypeScript SDK | Node.js/TS | 稳定 |
-| TypeScript V2 | Node.js/TS | 预览 |
+### 6.1 内置工具
 
-### 13.2 SDK 核心能力
+| 工具类别 | 工具 | 说明 |
+|---------|------|------|
+| **Shell 执行** | `exec` | 执行 Shell 命令（bash/zsh/PowerShell） |
+| **浏览器** | `browser` | 通过 CDP 控制 Chrome/Chromium，网页自动化 |
+| **Canvas** | `canvas` | A2UI 推送/重置、eval 执行、截图 |
+| **文件操作** | 文件读写 | 读取、创建、编辑文件 |
+| **Web 搜索** | `web_search` | 支持 Brave、Perplexity、Gemini、Grok、Kimi、Firecrawl |
+| **定时任务** | `cron` | 创建和管理 Cron Job |
+| **Webhook** | `hooks` | 接收外部系统的回调 |
+| **会话** | `sessions_*` | 跨会话通信 |
+| **设备** | `nodes` | 控制远程设备节点（摄像头、屏幕、通知等） |
+| **Gmail** | `gmail` | Pub/Sub 集成，邮件通知 |
+| **Discord/Slack** | 平台 action | 平台特定的高级操作 |
 
-- 非交互自动化（CI/CD 集成）
-- 程序化工具调用（Agent 自主决策）
-- 多 Agent 协调
-- 成本跟踪和监控
-- 自定义权限评估
-- 流式响应
-- 扩展思考
-- 结构化输出
+### 6.2 工具执行安全控制
 
-### 13.3 使用场景
+```json5
+{
+  tools: {
+    exec: {
+      security: "ask"     // "deny" | "ask" | "full"
+    },
+    elevated: {
+      enabled: false       // 高风险操作（摄像头、联系人、短信）
+    }
+  }
+}
+```
+
+| 安全级别 | 行为 |
+|---------|------|
+| `deny` | 禁止 Shell 执行 |
+| `ask` | 每次执行前需要用户批准 |
+| `full` | 自动执行（谨慎使用） |
+
+### 6.3 工具执行流程
+
+```
+Agent 决定调用工具
+       │
+       ▼
+┌──────────────────┐
+│ 1. 安全策略检查    │ ← deny / ask / full
+│ 2. 沙箱决策       │ ← 是否在 Docker 中执行
+│ 3. 权限审批       │ ← ask 模式下等待用户确认
+│ 4. 执行工具       │ ← 在主机或沙箱中运行
+│ 5. 收集输出       │ ← stdout / stderr / 文件
+│ 6. 返回给 Agent   │ ← Agent 继续推理
+└──────────────────┘
+```
+
+---
+
+## 7. Skill 技能系统
+
+Skill 是 OpenClaw 的扩展机制，通过 Markdown 文件教会 Agent 新的能力。
+
+### 7.1 Skill 的本质
+
+Skill = 一个目录 + 一个 `SKILL.md` 文件。没有 SDK、不需要编译、不需要特殊运行时。SKILL.md 中的 YAML frontmatter + Markdown 指令告诉 Agent：
+
+- 这个 Skill 叫什么
+- 什么时候使用它
+- 怎么使用它（工具调用步骤）
+
+### 7.2 加载顺序与优先级
+
+```
+优先级从高到低：
+1. 工作区 Skill   → <workspace>/skills/
+2. 本地 Skill     → ~/.openclaw/skills/
+3. 内置 Skill     → 安装包自带
+
+同名时高优先级覆盖低优先级。
+额外目录通过 skills.load.extraDirs 配置。
+```
+
+### 7.3 Skill 加载时的门控（Gating）
+
+Skill 在加载时会检查依赖条件：
+
+```yaml
+metadata:
+  openclaw:
+    requires:
+      bins: ["ffmpeg"]          # 必须安装 ffmpeg
+      anyBins: ["brew", "apt"]  # brew 或 apt 任一存在
+      env: ["GITHUB_TOKEN"]     # 必须设置环境变量
+      config: ["channels.telegram.botToken"]  # 必须配置
+    os: "darwin"                # 仅 macOS
+```
+
+条件不满足的 Skill 不会加载，不消耗上下文空间。
+
+### 7.4 Token 开销
+
+每个 Skill 在系统提示词中的开销：
+
+```
+基础开销（>=1 个 Skill）：195 字符
+每个 Skill：97 字符 + name + description + location 的长度
+粗略估算：每个 Skill 约 24 token
+```
+
+### 7.5 Skill 运行时行为
+
+```
+会话开始
+    │
+    ▼
+快照合格 Skill → 注入到系统提示词
+    │
+    ▼
+Agent 运行中...
+    │
+    ├── SKILL.md 文件变更 → 观察器检测 → 刷新快照
+    │
+    └── 会话结束 → 快照丢弃
+```
+
+（详细的 Skill 创建和使用请参见深度使用文档。）
+
+---
+
+## 8. 多 Agent 架构
+
+OpenClaw 支持在一个 Gateway 上运行多个完全隔离的 Agent。
+
+### 8.1 Agent 隔离三维度
+
+每个 Agent 是一个"完全独立的大脑"：
+
+| 维度 | 说明 |
+|------|------|
+| **Workspace** | 独立的工作目录、SOUL.md 人设、AGENTS.md、本地笔记 |
+| **State Directory (agentDir)** | `~/.openclaw/agents/<agentId>/`，存储认证、模型注册、配置 |
+| **Session Store** | `~/.openclaw/agents/<agentId>/sessions/`，独立的聊天历史 |
+
+> 重要：不要在不同 Agent 之间复用 agentDir，会导致认证/会话冲突。
+
+### 8.2 消息路由机制
+
+入站消息通过 **Bindings（绑定规则）** 路由到正确的 Agent：
+
+```
+路由优先级（从高到低）：
+1. 精确 peer 匹配（DM 或群 ID）
+2. 父级 peer 匹配（线程继承）
+3. Guild/Role 组合（Discord）
+4. Guild 或 Team ID
+5. Account ID 匹配
+6. 渠道级 fallback
+7. 默认 Agent
+```
+
+采用 **"最具体的优先"** 原则。绑定规则中多个字段同时指定时，必须全部匹配（AND 语义）。
+
+### 8.3 配置示例
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "work-agent",
+        workspace: "~/openclaw-work",
+        model: { primary: "anthropic/claude-sonnet-4-6" },
+        bindings: [
+          { channel: "slack", accountId: "work-slack" }
+        ]
+      },
+      {
+        id: "personal-agent",
+        workspace: "~/openclaw-personal",
+        model: { primary: "openai/gpt-4.1" },
+        bindings: [
+          { channel: "whatsapp" },
+          { channel: "telegram" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 8.4 应用场景
 
 | 场景 | 说明 |
 |------|------|
-| CI/CD 流水线 | 在 GitHub Actions 等中运行 Claude 自动化任务 |
-| 代码审查机器人 | 自动审查 PR 并提供反馈 |
-| 文档生成 | 批量处理代码库生成文档 |
-| 测试生成 | 自动为代码生成测试用例 |
-| 自定义工作流 | 结合多个 Agent 处理复杂业务流程 |
+| 工作/生活分离 | 不同渠道路由到不同 Agent，数据完全隔离 |
+| 多人共用 | 一个 Gateway 多人使用，每人一个 Agent |
+| 多语言/人设 | 不同 Agent 配置不同人设和语言偏好 |
+| 不同模型 | 不同任务使用不同模型（如代码用 Claude、日常用 GPT） |
+
+---
+
+## 9. 安全与沙箱
+
+### 9.1 安全模型
+
+OpenClaw 采用 **个人助手安全模型**（非多租户隔离）：
+
+```
+威胁模型：
+- 一个可信运营者（你）控制一个 Gateway 实例
+- 攻击者可能通过消息尝试 Prompt Injection
+- 不受信的内容（网页、邮件、附件）可能包含恶意指令
+- 被泄露的凭证可能导致工具被滥用
+```
+
+### 9.2 多层安全控制
+
+```
+┌──────────────────────────────────────────┐
+│ 第 1 层：访问控制                          │
+│  - Gateway 认证 (Token / Password)        │
+│  - DM Policy (pairing / allowlist / open) │
+│  - 群聊白名单                              │
+│  - 提及门控                                │
+├──────────────────────────────────────────┤
+│ 第 2 层：工具授权                          │
+│  - exec security: deny / ask / full       │
+│  - elevated tools 开关                    │
+│  - 解释器白名单 (strictInlineEval)        │
+├──────────────────────────────────────────┤
+│ 第 3 层：执行沙箱                          │
+│  - Docker 容器隔离                        │
+│  - 工作区访问控制 (none / ro / rw)        │
+│  - 网络出口控制                            │
+├──────────────────────────────────────────┤
+│ 第 4 层：凭证保护                          │
+│  - 文件权限 (700/600)                     │
+│  - 环境变量作用域隔离                      │
+│  - Secret 不进入 Agent 工作区             │
+└──────────────────────────────────────────┘
+```
+
+### 9.3 Docker 沙箱
+
+```json5
+{
+  agents: {
+    defaults: {
+      sandbox: {
+        mode: "non-main",    // off | non-main | all
+        scope: "session"     // session | agent | shared
+      }
+    }
+  }
+}
+```
+
+| 模式 | 说明 |
+|------|------|
+| `off` | 不使用沙箱 |
+| `non-main` | 非 main session 使用沙箱 |
+| `all` | 所有 session 都使用沙箱 |
+
+| 范围 | 说明 |
+|------|------|
+| `session` | 每个会话一个容器 |
+| `agent` | 每个 Agent 一个容器 |
+| `shared` | 所有 Agent 共享容器 |
+
+### 9.4 Prompt Injection 防御
+
+官方承认 Prompt Injection "尚未被解决"，采用多层缓解策略：
+
+1. **收紧访问**：通过 DM Policy 和白名单限制谁能发消息
+2. **缩减工具范围**：对公开 Agent 禁用危险工具（exec、browser）
+3. **选择强模型**：弱/小模型的抗注入能力差
+4. **沙箱隔离**：即使注入成功，也限制可造成的损害
+5. **凭证隔离**：敏感信息不放在 Agent 可访问的工作区
+
+### 9.5 安全审计
+
+```bash
+openclaw security audit          # 基本检查
+openclaw security audit --deep   # 探测运行中的 Gateway
+openclaw security audit --fix    # 自动修复权限和配置问题
+```
+
+---
+
+## 10. 配置系统
+
+### 10.1 配置文件
+
+```
+文件：~/.openclaw/openclaw.json
+格式：JSON5（支持注释和尾逗号）
+缺失时：使用安全默认值
+```
+
+### 10.2 配置结构
+
+```json5
+{
+  // Agent 配置
+  agents: {
+    defaults: {
+      workspace: "~/openclaw",
+      model: { primary: "anthropic/claude-sonnet-4-6" },
+      sandbox: { mode: "off" }
+    },
+    list: [/* 多 Agent 列表 */]
+  },
+
+  // 渠道配置
+  channels: {
+    telegram: { enabled: true, botToken: "..." },
+    whatsapp: { enabled: true, dmPolicy: "pairing" }
+  },
+
+  // 会话配置
+  session: {
+    dmScope: "main",
+    reset: { mode: "daily", atHour: 3 }
+  },
+
+  // 工具配置
+  tools: {
+    exec: { security: "ask" },
+    elevated: { enabled: false }
+  },
+
+  // Skill 配置
+  skills: {
+    entries: { /* 按名称配置 Skill */ },
+    load: { extraDirs: [] }
+  },
+
+  // 定时任务
+  cron: { enabled: true },
+
+  // Webhook
+  hooks: { enabled: false, token: "..." },
+
+  // Gateway 配置
+  gateway: {
+    bind: "loopback",
+    port: 18789,
+    auth: { token: "..." },
+    reload: { mode: "hybrid" }
+  }
+}
+```
+
+### 10.3 环境变量
+
+加载优先级：
+
+```
+1. 父进程环境变量
+2. .env（当前目录）
+3. ~/.openclaw/.env（全局）
+```
+
+配置文件中支持变量替换：
+
+```json5
+{
+  channels: {
+    telegram: {
+      botToken: "${TELEGRAM_BOT_TOKEN}"
+    }
+  }
+}
+```
+
+### 10.4 配置文件拆分 ($include)
+
+```json5
+{
+  $include: ["channels.json5", "agents.json5"],
+  gateway: { /* ... */ }
+}
+```
+
+- 相对路径解析到包含文件所在目录
+- 最多 10 层嵌套
+- 同级字段覆盖 include 的值
+- 支持单文件或数组（数组时深度合并）
+
+### 10.5 CLI 配置工具
+
+```bash
+openclaw onboard              # 交互式引导
+openclaw configure            # 配置向导
+openclaw config get <key>     # 获取配置值
+openclaw config set <key> <value>  # 设置配置值
+openclaw config unset <key>   # 删除配置项
+openclaw doctor               # 诊断验证
+openclaw doctor --fix         # 自动修复
+```
+
+### 10.6 严格校验
+
+OpenClaw 对配置进行**严格 Schema 校验**——未知字段、类型错误或无效值会**阻止启动**。只有 `$schema` 作为根级别例外允许用于编辑器 JSON Schema 提示。
+
+---
+
+## 11. 媒体处理管道
+
+OpenClaw 支持图片、音频、视频和文档的收发处理。
+
+### 11.1 处理流程
+
+```
+入站媒体：
+  用户发送图片/语音/文件
+      │
+      ▼
+  渠道适配器接收
+      │
+      ▼
+  保存到临时文件
+      │
+      ▼
+  类型处理：
+  ├── 图片 → 调整尺寸（imageMaxDimensionPx，默认 1200px）→ 发给模型（Vision）
+  ├── 音频 → 转写为文本（Whisper 等）→ 注入对话
+  ├── 文档 → 提取文本 → 注入对话
+  └── 视频 → 提取帧/音轨 → 分别处理
+
+出站媒体：
+  Agent 生成 → 渠道适配器 → 发送给用户
+```
+
+### 11.2 音频详细配置
+
+语音消息可以配置转写提供商、TTS（文本转语音）输出等。
+
+---
+
+## 12. 设备节点 (Node)
+
+设备节点让远程设备的能力（摄像头、屏幕、传感器等）可被 Agent 使用。
+
+### 12.1 节点类型
+
+| 节点 | 平台 | 能力 |
+|------|------|------|
+| **macOS App** | macOS | 菜单栏、语音唤醒、Push-to-Talk、WebChat、调试、远程 Gateway 控制 |
+| **macOS Node** | macOS | system.run、system.notify、Canvas、摄像头 |
+| **iOS Node** | iOS | Canvas、语音唤醒、Talk Mode、摄像头、屏幕录制、推送通知 |
+| **Android Node** | Android | Canvas、摄像头、屏幕截图、通知、定位、短信、相册、联系人、日历、运动数据、App 更新 |
+
+### 12.2 节点通信
+
+```
+设备节点 ←─ 配对 ─→ Gateway
+              │
+              ▼
+     Agent 调用 `nodes` 工具
+              │
+              ▼
+     节点执行操作并返回结果
+```
+
+### 12.3 跨平台 Skill
+
+当 Linux Gateway 连接到 macOS 节点且允许 `system.run` 时，需要 macOS 二进制的 Skill 可以通过节点执行。
+
+---
+
+## 13. 定时任务与 Webhook
+
+### 13.1 Cron 定时任务
+
+Agent 可以创建和管理定时任务：
+
+```json5
+{
+  cron: {
+    enabled: true,
+    maxConcurrentRuns: 3,
+    sessionRetention: "24h",    // 保留历史运行记录
+    runLog: {
+      maxBytes: "2mb",
+      keepLines: 2000
+    }
+  }
+}
+```
+
+使用场景：
+- 定时检查邮件
+- 定期生成报告
+- 定时健康检查
+- 定时数据同步
+
+### 13.2 Heartbeat 心跳
+
+Agent 可以定时主动联系用户：
+
+```json5
+{
+  agents: {
+    defaults: {
+      heartbeat: {
+        every: "2h",            // 每 2 小时
+        target: "whatsapp",     // 通过 WhatsApp 发送
+        directPolicy: "allow"   // 允许直接发消息
+      }
+    }
+  }
+}
+```
+
+### 13.3 Webhook
+
+外部系统可以通过 Webhook 触发 Agent 动作：
+
+```json5
+{
+  hooks: {
+    enabled: true,
+    token: "your-secret-token",  // 验证密钥
+    path: "/hooks",
+    defaultSessionKey: "webhook",
+    mappings: [/* 路由规则 */]
+  }
+}
+```
+
+使用场景：
+- GitHub PR 通知 → Agent 自动审查
+- 监控告警 → Agent 分析并通知
+- 外部系统事件 → Agent 自动处理
 
 ---
 
 ## 14. 架构总览图
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         用户输入                                 │
-│              (终端 / VS Code / JetBrains / 桌面应用)              │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Claude 语言模型层                              │
-│                 (Opus / Sonnet / Haiku)                          │
-│              推理 · 规划 · 代码生成 · 决策                        │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Agentic Loop 控制器                            │
-│              收集上下文 → 选择工具 → 执行 → 验证                   │
-│                                                                  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │  上下文管理  │  │   权限系统   │  │      Hook 系统          │  │
-│  │ · 会话状态   │  │ · Deny/Ask  │  │ · PreToolUse           │  │
-│  │ · CLAUDE.md  │  │   /Allow    │  │ · PostToolUse          │  │
-│  │ · 自动记忆   │  │ · 工具级控制 │  │ · SessionStart/End    │  │
-│  │ · 上下文压缩 │  │ · 沙箱模式  │  │ · 自定义 Shell/HTTP   │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-            ┌─────────────┼─────────────────┐
-            │             │                 │
-            ▼             ▼                 ▼
-┌───────────────┐ ┌──────────────┐ ┌───────────────────┐
-│   内置工具     │ │   MCP 服务器  │ │  Agent / Subagent │
-│ · Read/Write  │ │ · stdio      │ │ · Explore         │
-│ · Edit        │ │ · HTTP       │ │ · Plan            │
-│ · Bash        │ │ · SSE        │ │ · 自定义 Agent     │
-│ · Glob/Grep   │ │              │ │ · 工作树隔离       │
-│ · WebFetch    │ │ 工具格式：    │ │                   │
-│ · WebSearch   │ │ mcp__srv__fn │ │ Skill / Plugin    │
-│ · Agent       │ │              │ │ · 内置 Skill       │
-│ · Task*       │ │ 服务：        │ │ · 自定义 Skill     │
-│ · Cron*       │ │ GitHub/Slack │ │ · Plugin 市场      │
-│ · Notebook    │ │ DB/Jira/...  │ │                   │
-└───────────────┘ └──────────────┘ └───────────────────┘
-            │             │                 │
-            └─────────────┼─────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       执行环境                                    │
-│          本地文件系统 · Shell · Git · 网络 · 外部服务              │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                            用户                                      │
+│    WhatsApp / Telegram / Discord / Slack / iMessage / WebChat ...   │
+└────────────────────────────────┬────────────────────────────────────┘
+                                 │ 消息
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Gateway (端口 18789)                         │
+│                                                                      │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌───────────┐  │
+│  │ Channel      │  │  Message     │  │  Session   │  │  Health   │  │
+│  │ Adapters     │  │  Router      │  │  Manager   │  │  Monitor  │  │
+│  │ (21+ 渠道)   │  │  (Bindings)  │  │  (隔离策略) │  │  (自动恢复)│  │
+│  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘  └───────────┘  │
+│         │                 │                │                         │
+│         └─────────────────┼────────────────┘                         │
+│                           │                                          │
+│  ┌────────────────────────▼─────────────────────────────────────┐   │
+│  │                    Agent Runtime (Pi)                         │   │
+│  │                                                               │   │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────┐  │   │
+│  │  │  Model    │  │  Tool    │  │  Skill   │  │  Memory &   │  │   │
+│  │  │  Provider │  │  System  │  │  Engine  │  │  Context    │  │   │
+│  │  │  (35+)   │  │          │  │          │  │             │  │   │
+│  │  │ Claude   │  │ - exec   │  │ Bundled  │  │ Sessions    │  │   │
+│  │  │ GPT      │  │ - browser│  │ Managed  │  │ SOUL.md     │  │   │
+│  │  │ Gemini   │  │ - files  │  │ Workspace│  │ Persistence │  │   │
+│  │  │ Ollama   │  │ - search │  │ ClawHub  │  │             │  │   │
+│  │  │ ...      │  │ - nodes  │  │          │  │             │  │   │
+│  │  └──────────┘  │ - cron   │  └──────────┘  └─────────────┘  │   │
+│  │                │ - hooks  │                                   │   │
+│  │                └──────────┘                                   │   │
+│  └───────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │                     安全层                                    │   │
+│  │  DM Policy · 工具授权 · Docker 沙箱 · 凭证隔离 · 审计工具    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+│  ┌────────────┐  ┌────────────┐  ┌──────────────────────────────┐   │
+│  │ Control UI │  │ CLI        │  │ Device Nodes                 │   │
+│  │ (浏览器)    │  │ 命令行工具  │  │ macOS · iOS · Android       │   │
+│  └────────────┘  └────────────┘  └──────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        本地执行环境                                   │
+│          文件系统 · Shell · 浏览器 (CDP) · 智能家居 · 网络           │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -1052,12 +894,11 @@ Open Claw 在 Git 操作中遵循严格的安全准则：
 
 | 主题 | 链接 |
 |------|------|
-| 官方文档首页 | https://code.claude.com/docs/en/ |
-| 权限模式 | https://code.claude.com/docs/en/permission-modes |
-| CLAUDE.md | https://code.claude.com/docs/en/memory |
-| Hook 指南 | https://code.claude.com/docs/en/hooks-guide |
-| MCP 集成 | https://code.claude.com/docs/en/mcp |
-| 子 Agent | https://code.claude.com/docs/en/sub-agents |
-| Skill 系统 | https://code.claude.com/docs/en/skills |
-| 最佳实践 | https://code.claude.com/docs/en/best-practices |
-| Agent SDK | https://platform.claude.com/docs/agents |
+| 官方文档 | https://docs.openclaw.ai |
+| GitHub 仓库 | https://github.com/openclaw/openclaw |
+| Gateway 配置 | https://docs.openclaw.ai/gateway/configuration |
+| 安全文档 | https://docs.openclaw.ai/gateway/security |
+| 多 Agent | https://docs.openclaw.ai/concepts/multi-agent |
+| Skill 系统 | https://docs.openclaw.ai/tools/skills |
+| 功能列表 | https://docs.openclaw.ai/concepts/features |
+| 故障排查 | https://docs.openclaw.ai/gateway/troubleshooting |

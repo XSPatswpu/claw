@@ -1,886 +1,988 @@
-# Open Claw (Claude Code) 深度使用文档：Skill 系统
+# OpenClaw 深度使用文档：Skill 系统与扩展
 
 ## 目录
 
 - [1. 什么是 Skill](#1-什么是-skill)
-- [2. 内置 Skill 一览](#2-内置-skill-一览)
+- [2. 内置 Skill 与安装 Skill](#2-内置-skill-与安装-skill)
 - [3. 如何使用 Skill](#3-如何使用-skill)
 - [4. 如何创建自定义 Skill](#4-如何创建自定义-skill)
-- [5. Skill 文件结构详解](#5-skill-文件结构详解)
-- [6. Skill 存储位置与作用域](#6-skill-存储位置与作用域)
-- [7. Skill 的高级特性](#7-skill-的高级特性)
-- [8. 探索与发现新 Skill](#8-探索与发现新-skill)
-- [9. Skill 社区与生态](#9-skill-社区与生态)
-- [10. 团队共享 Skill](#10-团队共享-skill)
-- [11. 实战案例](#11-实战案例)
-- [12. Skill 与其他扩展机制对比](#12-skill-与其他扩展机制对比)
-- [13. 编写 Skill 的最佳实践](#13-编写-skill-的最佳实践)
-- [14. 参考资源](#14-参考资源)
+- [5. SKILL.md 格式详解](#5-skillmd-格式详解)
+- [6. Skill 存储位置与优先级](#6-skill-存储位置与优先级)
+- [7. Skill 的门控机制 (Gating)](#7-skill-的门控机制-gating)
+- [8. Skill 配置与环境变量注入](#8-skill-配置与环境变量注入)
+- [9. 探索新 Skill](#9-探索新-skill)
+- [10. ClawHub — Skill 注册中心](#10-clawhub--skill-注册中心)
+- [11. 社区生态](#11-社区生态)
+- [12. 自己写 Skill 实战](#12-自己写-skill-实战)
+- [13. Skill 安全注意事项](#13-skill-安全注意事项)
+- [14. Plugin 系统](#14-plugin-系统)
+- [15. 高级模式](#15-高级模式)
+- [16. 最佳实践](#16-最佳实践)
+- [17. 参考资源](#17-参考资源)
 
 ---
 
 ## 1. 什么是 Skill
 
-**Skill（技能）** 是 Open Claw 中可复用的结构化扩展，用 Markdown 文件定义，教会 Claude 如何执行特定任务或应用领域知识。
+Skill（技能）是 OpenClaw 的**核心扩展机制**。它是一个目录，包含一个 `SKILL.md` 文件，用 YAML frontmatter + Markdown 指令告诉 Agent 如何完成特定任务。
 
 ### 核心特征
 
-- **Markdown + YAML frontmatter** 格式（`.SKILL.md` 文件）
-- **两种调用方式：**
-  - **用户调用（User-invoked）**：你在交互模式中输入 `/skill-name` 手动触发
-  - **模型调用（Model-invoked）**：Claude 根据上下文自动判断何时使用
-- 支持**动态上下文注入**、参数传递、工具限制
-- 可包含**辅助文件**（模板、示例、脚本）
-- 遵循开放的 **Agent Skills 标准**，跨工具兼容
+- **纯文本**：不需要 SDK、不需要编译、不需要特殊运行时
+- **就是 Markdown**：YAML frontmatter 定义元数据，Markdown 正文定义行为
+- **兼容 AgentSkills 标准**：跨工具兼容的开放标准
+- **社区驱动**：ClawHub 注册中心有 13,000+ 社区贡献的 Skill
+- **自适应**：Agent 可以自己编写和更新 Skill
 
-### Skill vs 传统 Commands
+### Skill 能做什么
 
-```
-旧方式（仍兼容）：
-  .claude/commands/deploy.md  →  /deploy
-
-新方式（推荐）：
-  .claude/skills/deploy/SKILL.md  →  /deploy
-
-新方式的额外能力：
-  - 辅助文件（示例、模板、脚本）
-  - Frontmatter 控制（模型、推理强度、工具限制）
-  - 子 Agent 隔离执行（context: fork）
-  - 动态上下文注入（Shell 命令输出）
-```
-
-> 如果 Skill 和 Command 同名，**Skill 优先**。
+Skill 能让 Agent 学会任何可用工具组合完成的任务，例如：
+- 调用特定 API（GitHub、Spotify、智能家居）
+- 执行自动化工作流（部署、CI/CD、数据处理）
+- 操作特定软件（Obsidian、Gmail、数据库）
+- 浏览器自动化（网页抓取、表单填写）
+- 设备控制（摄像头、通知、文件管理）
 
 ---
 
-## 2. 内置 Skill 一览
+## 2. 内置 Skill 与安装 Skill
 
-Open Claw 自带以下 Skill：
+### 2.1 内置 Skill（Bundled）
 
-| Skill | 命令 | 功能 |
-|-------|------|------|
-| **batch** | `/batch <指令>` | 大规模并行修改。生成 5-30 个隔离 Agent，各自在独立 git 工作树中工作 |
-| **simplify** | `/simplify [聚焦点]` | 代码质量审查。生成 3 个并行审查 Agent，检查复用性、质量和效率 |
-| **loop** | `/loop [间隔] <提示词>` | 定时重复执行。在会话期间按间隔反复运行指定提示词 |
-| **schedule** | `/schedule` | 创建定时远程 Agent。设置 cron 定时任务 |
-| **claude-api** | `/claude-api` | 加载 Claude API 参考文档。当代码导入 `anthropic` SDK 时自动触发 |
-| **debug** | `/debug [描述]` | 调试当前会话。读取调试日志排查问题 |
-| **update-config** | `/update-config` | 配置 Claude Code。修改 settings.json、Hook、权限等 |
-| **keybindings-help** | `/keybindings` | 自定义快捷键。修改 keybindings.json |
+OpenClaw 安装包自带一批基础 Skill，开箱即用。你可以在配置中启用/禁用它们：
 
-### 使用示例
+```json5
+{
+  skills: {
+    entries: {
+      "bundled-skill-name": {
+        enabled: false  // 禁用某个内置 Skill
+      }
+    },
+    // 或者用白名单模式，只启用指定的内置 Skill
+    allowBundled: ["skill-a", "skill-b"]
+  }
+}
+```
+
+### 2.2 从 ClawHub 安装 Skill
 
 ```bash
-# 批量迁移 src/ 下的代码从 Solid 到 React
-/batch migrate src/ from Solid to React
+# 安装 Skill
+openclaw skills install <skill-slug>
 
-# 审查改动的代码质量，聚焦内存效率
-/simplify focus on memory efficiency
+# 或使用 npx（无需预先安装 clawhub CLI）
+npx clawhub@latest install <skill-slug>
 
-# 每 5 分钟检查部署是否完成
-/loop 5m check if deploy finished
+# 更新所有已安装 Skill
+openclaw skills update --all
+```
 
-# 加载 Claude API 参考
-/claude-api
+### 2.3 手动安装 Skill
+
+将 Skill 目录复制到以下位置之一：
+
+```bash
+# 全局（所有 Agent 可用）
+~/.openclaw/skills/<skill-name>/SKILL.md
+
+# 工作区（仅该 Agent 可用）
+<workspace>/skills/<skill-name>/SKILL.md
 ```
 
 ---
 
 ## 3. 如何使用 Skill
 
-### 3.1 用户调用的 Skill
+### 3.1 自动使用（模型调用）
 
-在交互模式中输入 `/` 后跟 Skill 名称：
+大多数 Skill 默认会被注入系统提示词，Agent **自动判断何时使用**。你只需正常对话：
 
-```bash
+```
+帮我在 GitHub 上创建一个 issue
+```
+
+如果安装了 GitHub Skill，Agent 会自动使用它。
+
+### 3.2 手动触发（斜杠命令）
+
+`user-invocable: true`（默认）的 Skill 可以作为斜杠命令使用：
+
+```
 /skill-name
-/skill-name [参数]
-/skill-name 可选参数
+/skill-name 参数
 ```
 
-示例：
+### 3.3 禁止自动调用
 
-```bash
-/fix-issue 123
-/migrate-component SearchBar React Vue
-/explain-code src/auth/login.ts
+某些有副作用的 Skill 可以设置为仅手动触发：
+
+```yaml
+disable-model-invocation: true  # Agent 不会自动使用，必须用 /skill-name
 ```
 
-### 3.2 模型自动调用的 Skill
+### 3.4 隐藏 Skill
 
-无需特殊语法，正常与 Claude 对话即可。Claude 会根据 Skill 的 `description` 字段判断何时使用。
+仅作为背景知识注入，不暴露为斜杠命令：
 
-例如，如果有一个描述为 "Generate API documentation with examples" 的 Skill，当你说"给 API 生成文档"时，Claude 会自动调用它。
-
-### 3.3 查看可用 Skill
-
-```bash
-/help           # 查看所有可用的 Skill 和命令
-/               # 输入斜杠后等待自动补全建议
-```
-
-### 3.4 重新加载 Skill
-
-编辑 Skill 文件后，无需重启会话：
-
-```bash
-/reload-plugins   # 重新加载所有 Skill 和 Plugin
+```yaml
+user-invocable: false  # 不出现在 / 菜单中
 ```
 
 ---
 
 ## 4. 如何创建自定义 Skill
 
-### 4.1 最小 Skill
-
-创建目录和 `SKILL.md` 文件即可：
+### 4.1 最简 Skill（60 秒完成）
 
 ```bash
-mkdir -p .claude/skills/greet
+mkdir -p ~/.openclaw/skills/hello
 ```
 
-`.claude/skills/greet/SKILL.md`:
+创建 `~/.openclaw/skills/hello/SKILL.md`：
+
+```markdown
+---
+name: hello
+description: 用中文打招呼并报告当前系统状态
+---
+
+当用户触发此 Skill 时：
+
+1. 用中文友好地打招呼
+2. 运行 `uname -a` 查看系统信息
+3. 运行 `uptime` 查看运行时间
+4. 运行 `df -h /` 查看磁盘使用
+5. 用简洁的格式汇报以上信息
+```
+
+现在在聊天中发送 `/hello` 即可使用。
+
+### 4.2 带 API 调用的 Skill
+
+```markdown
+---
+name: weather
+description: 查询指定城市的天气预报
+---
+
+当用户询问天气时：
+
+1. 从用户消息中提取城市名
+2. 使用 curl 调用天气 API：
+   ```
+   curl -s "https://wttr.in/<城市>?format=j1"
+   ```
+3. 解析 JSON 响应，提取：
+   - 当前温度
+   - 天气状况
+   - 未来 3 天预报
+4. 用清晰的格式回复用户
+```
+
+### 4.3 带工具调用的 Skill
+
+```markdown
+---
+name: screenshot-report
+description: 截取网页截图并生成分析报告
+---
+
+当用户提供一个 URL 时：
+
+1. 使用 browser 工具打开该 URL
+2. 等待页面加载完成
+3. 截取全屏截图
+4. 分析截图内容：
+   - 页面布局
+   - 主要内容
+   - 可能的问题（加载错误、样式异常）
+5. 生成报告发送给用户
+```
+
+---
+
+## 5. SKILL.md 格式详解
+
+### 5.1 基本结构
+
+```markdown
+---
+name: skill-identifier
+description: 简短描述这个 Skill 做什么以及何时使用
+---
+
+# Skill 标题
+
+Markdown 格式的指令正文...
+```
+
+### 5.2 完整 Frontmatter 字段
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `name` | string | 目录名 | Skill 标识符 |
+| `description` | string | - | 功能描述（Agent 据此判断是否使用） |
+| `homepage` | string | - | 在 UI 中显示为"Website"链接 |
+| `user-invocable` | boolean | `true` | 是否作为斜杠命令暴露 |
+| `disable-model-invocation` | boolean | `false` | 是否禁止 Agent 自动使用 |
+| `command-dispatch` | string | - | 设为 `tool` 跳过模型直接调用工具 |
+| `command-tool` | string | - | 与 `command-dispatch: tool` 配合，指定目标工具 |
+| `command-arg-mode` | string | - | 设为 `raw` 直接传递未解析的参数 |
+| `metadata` | object | - | 门控条件、平台过滤、安装配置等 |
+
+### 5.3 metadata 字段详解
 
 ```yaml
----
-name: greet
-description: 用中文打招呼并介绍项目概况
----
+metadata:
+  openclaw:
+    # 门控条件（不满足则不加载）
+    requires:
+      bins: ["ffmpeg"]              # 必须存在的二进制
+      anyBins: ["brew", "apt"]      # 任一存在即可
+      env: ["GITHUB_TOKEN"]         # 必须设置的环境变量
+      config: ["channels.telegram.botToken"]  # 必须有的配置
 
-用中文向用户打招呼，然后简要介绍当前项目的技术栈和目录结构。
+    # 平台过滤
+    os: "darwin"                     # darwin | linux | win32
+
+    # 始终加载（跳过所有门控）
+    always: true
+
+    # UI 图标（macOS）
+    emoji: "🌤️"
+
+    # API Key 关联
+    primaryEnv: "WEATHER_API_KEY"
+
+    # 安装方式声明
+    install:
+      - id: "brew"
+        kind: "brew"
+        formula: "ffmpeg"
+        bins: ["ffmpeg"]
+        label: "通过 Homebrew 安装"
+      - id: "node"
+        kind: "node"
+        package: "some-tool"
+        bins: ["some-tool"]
 ```
 
-现在在交互模式中输入 `/greet` 即可使用。
-
-### 4.2 带参数的 Skill
-
-使用 `$ARGUMENTS` 占位符接收用户输入：
-
-```yaml
----
-name: explain-file
-description: 详细解释指定文件的代码逻辑
-argument-hint: [文件路径]
----
-
-请详细解释 $ARGUMENTS 这个文件：
-
-1. 文件的整体作用
-2. 主要的函数/类及其职责
-3. 关键的数据流
-4. 值得注意的设计模式或技巧
-```
-
-使用：`/explain-file src/auth/middleware.ts`
-
-### 4.3 带工具限制的 Skill
-
-```yaml
----
-name: safe-audit
-description: 只读安全审计，不做任何修改
-allowed-tools: Read, Grep, Glob
----
-
-对 $ARGUMENTS 进行安全审计：
-- 检查硬编码的密钥
-- 验证输入处理
-- 审查认证逻辑
-- 检查 SQL 注入风险
-```
-
-### 4.4 带动态上下文的 Skill
-
-使用 `` !`命令` `` 语法在 Skill 加载时执行 Shell 命令并注入输出：
-
-```yaml
----
-name: pr-summary
-description: 总结当前 Pull Request
-context: fork
----
-
-## PR 上下文
-- PR diff: !`gh pr diff`
-- PR 评论: !`gh pr view --comments`
-- 修改的文件: !`gh pr diff --name-only`
-
-请基于以上信息，用中文写一份 PR 总结：
-1. 核心改动
-2. 具体代码变更引用
-3. 讨论要点
-```
-
-### 4.5 在子 Agent 中运行的 Skill
-
-使用 `context: fork` 在隔离环境中执行，避免污染主会话上下文：
-
-```yaml
----
-name: deep-analysis
-description: 深度代码分析（在隔离 Agent 中运行）
-context: fork
-agent: Explore
----
-
-对 $ARGUMENTS 进行深度分析：
-1. 查找所有相关的安全文件
-2. 分析认证、授权、输入验证
-3. 汇总发现并按严重程度排序
-```
-
----
-
-## 5. Skill 文件结构详解
-
-### 5.1 单文件 Skill
-
-最简形式：
+### 5.4 目录结构
 
 ```
 my-skill/
-└── SKILL.md       ← 必需，包含指令和 frontmatter
+├── SKILL.md           ← 必需，主文件
+├── README.md          ← 可选，给人看的说明
+├── examples/          ← 可选，示例文件
+├── templates/         ← 可选，模板文件
+└── scripts/           ← 可选，辅助脚本
 ```
 
-### 5.2 带辅助文件的复杂 Skill
+---
+
+## 6. Skill 存储位置与优先级
+
+### 6.1 三级存储
+
+| 位置 | 优先级 | 说明 |
+|------|--------|------|
+| `<workspace>/skills/` | 最高 | 工作区级，每个 Agent 独立 |
+| `~/.openclaw/skills/` | 中 | 本地/管理级，所有 Agent 共享 |
+| 安装包内置 | 最低 | Bundled Skill |
+
+**同名时高优先级覆盖低优先级。**
+
+### 6.2 额外目录
+
+```json5
+{
+  skills: {
+    load: {
+      extraDirs: ["/path/to/extra/skills"]
+    }
+  }
+}
+```
+
+### 6.3 多 Agent 场景
 
 ```
-doc-generator/
-├── SKILL.md           ← 必需，主要指令
-├── reference.md       ← 详细 API 文档
-├── examples.md        ← 使用示例
-├── templates/
-│   ├── api-endpoint.md
-│   └── function.md
-└── scripts/
-    └── validate.sh    ← 辅助脚本
+~/.openclaw/skills/          ← 所有 Agent 共享
+~/openclaw-work/skills/      ← 仅 work Agent 可用
+~/openclaw-personal/skills/  ← 仅 personal Agent 可用
 ```
 
-在 SKILL.md 中引用辅助文件：
+---
+
+## 7. Skill 的门控机制 (Gating)
+
+门控是 OpenClaw 的智能 Skill 管理机制——不满足前提条件的 Skill 不会加载，不会浪费上下文空间。
+
+### 7.1 二进制依赖
+
+```yaml
+metadata:
+  openclaw:
+    requires:
+      bins: ["docker", "git"]     # 必须全部存在
+      anyBins: ["nvim", "vim"]    # 任一存在即可
+```
+
+### 7.2 环境变量依赖
+
+```yaml
+metadata:
+  openclaw:
+    requires:
+      env: ["OPENAI_API_KEY"]     # 必须设置该环境变量
+```
+
+### 7.3 配置依赖
+
+```yaml
+metadata:
+  openclaw:
+    requires:
+      config: ["channels.slack.botToken"]  # 必须有 Slack 配置
+```
+
+### 7.4 平台过滤
+
+```yaml
+metadata:
+  openclaw:
+    os: "darwin"    # 仅 macOS 加载
+```
+
+### 7.5 跳过门控
+
+```yaml
+metadata:
+  openclaw:
+    always: true    # 无条件加载
+```
+
+---
+
+## 8. Skill 配置与环境变量注入
+
+### 8.1 为 Skill 配置 API Key
+
+在 `~/.openclaw/openclaw.json` 中：
+
+```json5
+{
+  skills: {
+    entries: {
+      "weather": {
+        enabled: true,
+        apiKey: {
+          source: "env",
+          provider: "default",
+          id: "WEATHER_API_KEY"
+        }
+      }
+    }
+  }
+}
+```
+
+### 8.2 为 Skill 注入环境变量
+
+```json5
+{
+  skills: {
+    entries: {
+      "my-skill": {
+        env: {
+          DATABASE_URL: "postgres://...",
+          API_SECRET: "..."
+        },
+        config: {
+          customKey: "customValue"
+        }
+      }
+    }
+  }
+}
+```
+
+### 8.3 环境变量作用域
+
+OpenClaw 的环境注入是**安全隔离**的：
+
+```
+Agent 运行前：
+  1. 读取 Skill metadata
+  2. 将配置的 env 和 apiKey 注入 process.env
+  3. 构建系统提示词
+
+Agent 运行后：
+  4. 恢复原始环境变量
+```
+
+这意味着 Skill 的环境变量**不会泄露到其他进程**。
+
+---
+
+## 9. 探索新 Skill
+
+### 9.1 ClawHub 在线浏览
+
+访问 https://clawhub.ai 浏览和搜索 Skill。
+
+### 9.2 awesome-openclaw-skills 精选列表
+
+GitHub 上的社区精选列表，从 13,729 个 Skill 中精选了 5,211 个高质量 Skill：
+
+https://github.com/VoltAgent/awesome-openclaw-skills
+
+### 9.3 按分类浏览
+
+社区精选 Skill 按 25 个类别组织：
+
+| 类别 | Skill 数量 | 示例 |
+|------|-----------|------|
+| Coding Agents & IDEs | 1,184 | 代码生成、IDE 集成、Lint |
+| Web & Frontend | 919 | React、Vue、CSS 工具 |
+| DevOps & Cloud | 393 | Docker、K8s、AWS、CI/CD |
+| Search & Research | 345 | 搜索引擎、学术搜索 |
+| Browser & Automation | 322 | 网页抓取、表单填写 |
+| Productivity & Tasks | 205 | 日程管理、TODO |
+| CLI Utilities | 180 | 命令行工具增强 |
+| AI & LLMs | 176 | 模型集成、Prompt 工程 |
+| Image & Video | 170 | 图像生成、视频处理 |
+| Git & GitHub | 167 | PR 管理、Issue 追踪 |
+| Communication | 146 | 邮件、消息平台 |
+| PDF & Documents | 105 | 文档处理、OCR |
+| Marketing & Sales | 102 | SEO、社媒管理 |
+| Health & Fitness | 87 | WHOOP、健康追踪 |
+| Media & Streaming | 85 | Spotify、播客 |
+| Notes & PKM | 70 | Obsidian、笔记管理 |
+| Calendar & Scheduling | 65 | 日历、会议管理 |
+| Security & Passwords | 53 | 安全审计、密码管理 |
+| Shopping & E-commerce | 51 | 购物、价格追踪 |
+| Speech & Transcription | 45 | 语音识别、转写 |
+| Apple Apps & Services | 44 | Apple 生态集成 |
+| Smart Home & IoT | 41 | Hue、智能家居控制 |
+| Self-Hosted | 33 | 自建服务集成 |
+| iOS & macOS Dev | 29 | Swift、Xcode |
+| Data & Analytics | 28 | 数据分析、BI |
+
+### 9.4 CLI 搜索
+
+```bash
+# 列出已安装的 Skill
+openclaw skills list
+
+# 从 ClawHub 安装
+openclaw skills install <slug>
+```
+
+---
+
+## 10. ClawHub — Skill 注册中心
+
+### 10.1 什么是 ClawHub
+
+ClawHub（https://clawhub.ai）是 OpenClaw 的官方 Skill 注册中心，类似 npm 之于 Node.js：
+
+- **发布**：上传你的 Skill 让所有人使用
+- **版本管理**：像 npm 一样管理版本
+- **向量搜索**：智能搜索找到合适的 Skill
+- **开放**：无审核门槛（"No gatekeeping, just signal"）
+
+### 10.2 安装 Skill
+
+```bash
+# 通过 OpenClaw CLI
+openclaw skills install <slug>
+
+# 通过 npx
+npx clawhub@latest install <slug>
+```
+
+### 10.3 发布 Skill
+
+```bash
+# 发布本地 Skill 到 ClawHub
+clawhub publish <path-to-skill>
+
+# 同步更新
+clawhub sync
+```
+
+### 10.4 管理已安装的 Skill
+
+```bash
+clawhub install <slug>       # 安装
+clawhub uninstall <slug>     # 卸载
+clawhub list                 # 列出已安装
+clawhub update --all         # 更新全部
+```
+
+### 10.5 注册中心规模
+
+截至 2026 年 2 月底，ClawHub 上有 **13,729** 个社区贡献的 Skill。
+
+---
+
+## 11. 社区生态
+
+### 11.1 GitHub 仓库
+
+| 仓库 | 说明 |
+|------|------|
+| [openclaw/openclaw](https://github.com/openclaw/openclaw) | 主仓库（100,000+ stars） |
+| [openclaw/clawhub](https://github.com/openclaw/clawhub) | ClawHub 注册中心源码 |
+| [VoltAgent/awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills) | 社区精选 5,200+ Skill |
+
+### 11.2 社区渠道
+
+| 渠道 | 用途 |
+|------|------|
+| Discord | 官方社区，讨论和支持 |
+| GitHub Discussions | 功能请求、技术讨论 |
+| GitHub Issues | Bug 报告 |
+
+### 11.3 贡献 Skill 到 awesome 列表
+
+贡献步骤：
+1. Skill 必须已发布到 `github.com/openclaw/skills` 仓库
+2. PR 中需包含 ClawHub 链接和 GitHub 仓库链接
+3. 不接受个人仓库或外部来源的 Skill
+
+### 11.4 项目历史
+
+```
+2025-11  Clawdbot 发布（最初名为"WhatsApp Relay"周末项目）
+         → 72 小时内获得 60,000+ GitHub stars
+2025-12  因 Anthropic 商标投诉更名为 Moltbot
+2026-01  更名为 OpenClaw
+2026-02  ClawHub 上 13,729 个 Skill
+2026-03  持续快速发展中
+```
+
+---
+
+## 12. 自己写 Skill 实战
+
+### 12.1 实战一：GitHub Issue 管理
 
 ```markdown
 ---
-name: doc-generator
-description: 生成 API 文档和示例
+name: gh-issues
+description: 管理 GitHub Issue：创建、列表、搜索、关闭
 ---
 
-# API 文档生成器
+# GitHub Issue 管理
 
-详细用法见 [examples.md](examples.md)。
-完整配置选项见 [reference.md](reference.md)。
+## 创建 Issue
+当用户要求创建 Issue 时：
+1. 从消息中提取仓库名、标题、描述
+2. 运行：`gh issue create --repo <repo> --title "<title>" --body "<body>"`
+3. 返回创建的 Issue URL
 
-## 步骤
-1. 读取并理解代码
-2. 按 [templates/](templates/) 中的模板生成文档
-3. 使用 [validate.sh](scripts/validate.sh) 验证
+## 列出 Issue
+当用户要求查看 Issue 时：
+1. 运行：`gh issue list --repo <repo> --state open --limit 20`
+2. 格式化为清晰的列表返回
+
+## 搜索 Issue
+当用户搜索 Issue 时：
+1. 运行：`gh issue list --repo <repo> --search "<query>"`
+2. 返回匹配结果
+
+## 关闭 Issue
+当用户要求关闭 Issue 时：
+1. 确认 Issue 编号
+2. 运行：`gh issue close <number> --repo <repo>`
+3. 确认已关闭
 ```
 
-> 建议 SKILL.md 保持 **500 行以内**，详细内容移到辅助文件。
-
-### 5.3 Frontmatter 字段参考
-
-| 字段 | 必需 | 说明 |
-|------|------|------|
-| `name` | 否 | 显示名称（小写、连字符/数字，最长 64 字符）。默认使用目录名 |
-| `description` | 推荐 | 何时使用此 Skill。Claude 据此判断是否自动调用 |
-| `argument-hint` | 否 | 参数提示，显示在自动补全中。如 `[issue-number]`、`[filename] [format]` |
-| `disable-model-invocation` | 否 | 设为 `true` 禁止 Claude 自动调用。适用于有副作用的工作流 |
-| `user-invocable` | 否 | 设为 `false` 隐藏于 `/` 菜单。用于背景知识型 Skill |
-| `allowed-tools` | 否 | 限制可用工具：`Read, Grep, Glob, Bash, Edit, Write` |
-| `model` | 否 | 覆盖模型：`sonnet`、`opus`、`haiku` 或完整模型 ID |
-| `effort` | 否 | 覆盖推理强度：`low`、`medium`、`high`、`max` |
-| `context` | 否 | 设为 `fork` 在隔离子 Agent 中运行 |
-| `agent` | 否 | 与 `context: fork` 配合，指定子 Agent 类型 |
-| `hooks` | 否 | 仅在此 Skill 激活时生效的 Hook |
-
----
-
-## 6. Skill 存储位置与作用域
-
-### 6.1 作用域层级
-
-当同名 Skill 存在于多个位置时，高优先级的覆盖低优先级的：
-
-| 位置 | 作用域 | 优先级 | 共享方式 |
-|------|--------|--------|----------|
-| 企业管理设置 | 全组织 | 1（最高） | 管理员控制台下发 |
-| `~/.claude/skills/<name>/SKILL.md` | 个人所有项目 | 2 | 不共享（仅本人） |
-| `.claude/skills/<name>/SKILL.md` | 当前项目 | 3 | 提交到 git（团队共享） |
-| Plugin 的 `skills/<name>/SKILL.md` | Plugin 启用的项目 | 4（最低） | 随 Plugin 分发 |
-
-### 6.2 自动发现
-
-- `.claude/skills/` 目录下的 Skill 自动发现
-- 支持嵌套子目录（适用于 Monorepo 中按 package 定义 Skill）
-- 通过 `--add-dir` 添加的目录中的 Skill 也会自动加载并实时热更新
-
-### 6.3 推荐的目录组织
-
-```
-.claude/
-├── skills/
-│   ├── code-review/
-│   │   └── SKILL.md
-│   ├── doc-generator/
-│   │   ├── SKILL.md
-│   │   ├── templates/
-│   │   └── examples.md
-│   ├── deploy/
-│   │   └── SKILL.md
-│   └── test-generator/
-│       └── SKILL.md
-├── agents/
-│   ├── reviewer.md
-│   └── deployer.md
-├── rules/
-│   ├── api-rules.md
-│   └── frontend-rules.md
-└── settings.json
-```
-
----
-
-## 7. Skill 的高级特性
-
-### 7.1 Skill 内定义 Hook
-
-Skill 可以定义仅在自身激活时生效的 Hook：
+门控条件：
 
 ```yaml
----
-name: auto-formatter
-description: 编辑文件后自动格式化
-hooks:
-  PostToolUse:
-    - matcher: "Edit|Write"
-      hooks:
-        - type: command
-          command: "prettier --write $FILE_PATH"
----
-
-编辑代码后自动使用 Prettier 格式化。
+metadata:
+  openclaw:
+    requires:
+      bins: ["gh"]
+      env: ["GITHUB_TOKEN"]
 ```
 
-### 7.2 Shell 命令动态注入上下文
+### 12.2 实战二：Obsidian 笔记
 
-`` !`命令` `` 语法在 Skill 加载时执行命令，将输出注入 Claude 的上下文：
-
-```yaml
+```markdown
 ---
-name: status-report
-description: 生成项目状态报告
+name: obsidian-notes
+description: 在 Obsidian vault 中创建和搜索笔记
 ---
 
-## 当前状态
-- Git 状态: !`git status --short`
-- 最近提交: !`git log --oneline -5`
-- 分支列表: !`git branch -a`
-- 依赖检查: !`npm outdated 2>/dev/null || echo "无过期依赖"`
+# Obsidian 笔记管理
 
-基于以上信息，生成一份项目状态报告。
+Obsidian vault 位于 ~/Documents/Obsidian/
+
+## 创建笔记
+1. 确定笔记标题和内容
+2. 生成 Markdown 文件，包含 YAML frontmatter：
+   ```
+   ---
+   created: <当前日期>
+   tags: [<相关标签>]
+   ---
+   ```
+3. 写入 ~/Documents/Obsidian/<标题>.md
+
+## 搜索笔记
+1. 使用 grep 在 vault 目录中搜索关键词
+2. 返回匹配的笔记文件名和相关上下文
+
+## 每日笔记
+1. 创建 ~/Documents/Obsidian/Daily/<YYYY-MM-DD>.md
+2. 包含日期模板和用户提供的内容
 ```
 
-### 7.3 在子 Agent 中隔离运行
+### 12.3 实战三：智能家居控制（Hue）
 
-```yaml
+```markdown
 ---
-name: codebase-analyzer
-description: 全代码库分析（约消耗 10k token，建议在新会话中使用）
-context: fork
-agent: Explore
-allowed-tools: Read, Grep, Glob, Bash
----
-
-扫描整个代码库：
-1. 分析目录结构和模块划分
-2. 识别技术栈和框架
-3. 找出代码热点（频繁修改的文件）
-4. 评估代码质量指标
-5. 生成架构概览图
-```
-
-`context: fork` 的好处：
-- 大量搜索结果留在子 Agent 内，不污染主会话
-- 子 Agent 有独立的上下文窗口
-- 主会话只收到摘要结果
-
-### 7.4 Skill 中使用 $ARGUMENTS
-
-`$ARGUMENTS` 会被替换为用户在 `/skill-name` 后面输入的所有文本：
-
-```yaml
----
-name: review-pr
-description: 审查指定的 Pull Request
-argument-hint: [PR 编号]
+name: hue-control
+description: 控制 Philips Hue 智能灯光
 ---
 
-审查 PR #$ARGUMENTS：
-1. 获取 PR 的 diff
-2. 检查代码质量
-3. 查找潜在 Bug
-4. 评估测试覆盖
-5. 给出审查意见
+# Philips Hue 控制
+
+使用 Hue Bridge API 控制灯光。
+
+## 查看所有灯
+```
+curl -s http://<bridge-ip>/api/<key>/lights | python3 -m json.tool
 ```
 
-使用：`/review-pr 456`
-
----
-
-## 8. 探索与发现新 Skill
-
-### 8.1 在 Open Claw 内部探索
-
-```bash
-# 查看所有可用 Skill 和命令
-/help
-
-# 输入 / 等待自动补全
-/
-
-# 浏览官方 Plugin 市场
-/plugin
-
-# 查看可用的子 Agent（与 Skill 相关）
-/agents
-
-# 重新加载 Skill（编辑后）
-/reload-plugins
+## 开/关灯
+```
+curl -s -X PUT http://<bridge-ip>/api/<key>/lights/<id>/state \
+  -d '{"on": true}'
 ```
 
-### 8.2 自然语言探索
-
-直接问 Claude：
-
+## 调节亮度
 ```
-有哪些可用的 Skill？
-有没有用于代码审查的 Skill？
-列出所有项目级别的 Skill
+curl -s -X PUT http://<bridge-ip>/api/<key>/lights/<id>/state \
+  -d '{"on": true, "bri": <0-254>}'
 ```
 
-### 8.3 创建"Skill 发现器"
-
-你可以创建一个元 Skill 来列出所有可用 Skill：
-
-```yaml
----
-name: discover
-description: 列出所有可用的 Skill 及其用途
-disable-model-invocation: true
----
-
-# 可用 Skill 一览
-
-请列出当前项目中所有可用的 Skill，包括：
-1. Skill 名称和调用方式
-2. 功能描述
-3. 是否支持参数
-4. 使用示例
-
-按类别分组展示（开发、测试、部署、文档等）。
+## 变色
+```
+curl -s -X PUT http://<bridge-ip>/api/<key>/lights/<id>/state \
+  -d '{"on": true, "hue": <0-65535>, "sat": <0-254>}'
+```
 ```
 
----
+配合环境变量注入：
 
-## 9. Skill 社区与生态
-
-### 9.1 官方 Plugin 市场
-
-Open Claw 有内置的 Plugin 市场，Plugin 可以包含 Skill：
-
-```bash
-/plugin          # 浏览官方市场
-```
-
-**市场分类：**
-- Code Intelligence（代码智能）
-- Development Workflows（开发工作流）
-- Output Styles（输出风格）
-- External Integrations（外部集成）
-
-**提交你的 Plugin：**
-- Claude.ai 用户：https://claude.ai/settings/plugins/submit
-- Console 用户：https://platform.claude.com/plugins/submit
-
-### 9.2 GitHub 社区
-
-在 GitHub 上搜索以下关键词发现社区 Skill：
-
-- `claude-code-skill`
-- `claude-code-plugin`
-- `agent-skills`
-- `claude-code-commands`
-
-### 9.3 Agent Skills 开放标准
-
-Open Claw 的 Skill 系统实现了 **Agent Skills** 开放标准：
-
-- 官网：https://agentskills.io
-- 跨工具兼容：同一个 Skill 可以在不同的 AI 工具中使用
-- 社区贡献和标准化
-
-### 9.4 分享你的 Skill
-
-**方式一：GitHub 仓库**
-
-创建一个包含 Skill 的仓库，其他人可以克隆使用：
-
-```
-my-awesome-skills/
-├── README.md
-├── skills/
-│   ├── skill-a/
-│   │   └── SKILL.md
-│   └── skill-b/
-│       ├── SKILL.md
-│       └── templates/
-└── LICENSE
-```
-
-**方式二：作为 Plugin 发布**
-
-打包为 Plugin 格式，提交到官方市场或通过 URL 分发。
-
-**方式三：Gist / 代码片段**
-
-对于简单的单文件 Skill，直接分享 SKILL.md 的内容即可。
-
----
-
-## 10. 团队共享 Skill
-
-### 10.1 方式一：项目级 Skill（推荐）
-
-将 `.claude/skills/` 提交到版本控制：
-
-```bash
-git add .claude/skills/
-git commit -m "添加团队共享 Skill：代码审查和文档生成"
-git push
-```
-
-团队成员 pull 后自动获得所有 Skill。
-
-### 10.2 方式二：Plugin 分发
-
-创建一个 Plugin 项目：
-
-```bash
-mkdir my-team-skills
-mkdir -p my-team-skills/.claude-plugin
-
-cat > my-team-skills/.claude-plugin/plugin.json << 'EOF'
+```json5
 {
-  "name": "team-skills",
-  "description": "团队共享的开发工作流 Skill",
-  "version": "1.0.0"
+  skills: {
+    entries: {
+      "hue-control": {
+        env: {
+          HUE_BRIDGE_IP: "192.168.1.100",
+          HUE_API_KEY: "your-api-key"
+        }
+      }
+    }
+  }
 }
-EOF
-
-mkdir -p my-team-skills/skills/code-review
-# 添加你的 Skill 文件...
 ```
 
-团队成员安装：
+### 12.4 实战四：数据库查询
 
-```bash
-/plugin install https://github.com/yourteam/team-skills
-```
-
-### 10.3 方式三：企业统一下发
-
-使用 Managed Settings（管理员控制台）将 Skill 部署到全组织所有用户。
-
+```markdown
 ---
-
-## 11. 实战案例
-
-### 11.1 案例一：自动更新 API 文档
-
-```yaml
----
-name: update-api-docs
-description: 从代码注释自动更新 API 文档
+name: db-query
+description: 查询 PostgreSQL 数据库
 disable-model-invocation: true
-allowed-tools: Read, Grep, Bash, Edit
-argument-hint: [目标目录，默认 src/routes]
 ---
 
-# 更新 API 文档
+# 数据库查询工具
 
-1. 查找 ${ARGUMENTS:-src/routes} 中所有端点文件（*.ts）
-2. 提取 JSDoc 注释和类型定义
-3. 按模板生成 Markdown 文档
-4. 更新 docs/api.md
-5. 运行 Markdown lint 检查
-6. 如果有改动，列出修改摘要
-```
+仅在用户明确使用 /db-query 时触发。
 
-使用：
+## 安全规则
+- 只允许 SELECT 查询
+- 禁止 DROP、DELETE、UPDATE、INSERT（除非用户明确要求）
+- 查询前先确认 SQL 语句
 
+## 执行查询
 ```bash
-/update-api-docs
-/update-api-docs src/api/v2
+psql "$DATABASE_URL" -c "<SQL>"
 ```
 
-### 11.2 案例二：智能 Code Review
-
-```yaml
----
-name: review
-description: 审查代码变更，关注安全性、性能和可维护性
-context: fork
-allowed-tools: Read, Grep, Glob, Bash
----
-
-## 审查上下文
-- 变更文件: !`git diff --name-only HEAD~1`
-- 详细 diff: !`git diff HEAD~1`
-
-## 审查清单
-
-请按以下维度审查这些变更：
-
-### 安全性
-- [ ] 是否有硬编码密钥
-- [ ] 输入是否经过验证
-- [ ] 是否有 SQL/XSS 注入风险
-
-### 性能
-- [ ] 是否有 N+1 查询
-- [ ] 是否有不必要的循环
-- [ ] 内存使用是否合理
-
-### 可维护性
-- [ ] 命名是否清晰
-- [ ] 是否有重复代码
-- [ ] 错误处理是否完善
-
-### 测试
-- [ ] 新代码是否有测试覆盖
-- [ ] 边界条件是否考虑
-
-对每个发现的问题，给出：
-1. 问题位置（文件:行号）
-2. 严重程度（高/中/低）
-3. 修改建议
-```
-
-### 11.3 案例三：测试生成器
-
-```yaml
----
-name: gen-test
-description: 为指定文件生成单元测试
-argument-hint: [源文件路径]
-allowed-tools: Read, Grep, Glob, Write, Bash
----
-
-# 测试生成器
-
-为 $ARGUMENTS 生成全面的单元测试：
-
-## 步骤
-1. 读取源文件，理解所有导出的函数/类
-2. 查看项目中已有的测试文件，学习测试风格和框架
-3. 为每个函数/方法生成测试用例：
-   - 正常输入
-   - 边界条件
-   - 错误情况
-   - 类型检查（如适用）
-4. 将测试写入对应的测试文件（遵循项目的测试文件命名规范）
-5. 运行测试确保通过
-```
-
-使用：`/gen-test src/utils/parser.ts`
-
-### 11.4 案例四：定时监控部署
-
+## 查看表结构
 ```bash
-# 每 3 分钟检查部署状态
-/loop 3m 检查 GitHub Actions 的部署流水线是否完成，如果完成了报告结果
-
-# 每 10 分钟检查 PR 状态
-/loop 10m 检查我的待审 PR 列表，如果有新评论就总结
+psql "$DATABASE_URL" -c "\dt"           # 列出所有表
+psql "$DATABASE_URL" -c "\d <table>"    # 查看表结构
 ```
-
-### 11.5 案例五：批量迁移
-
-```bash
-# 将所有组件从 Class 组件迁移到函数式组件
-/batch 将 src/components/ 下的所有 Class 组件改写为函数式组件，使用 hooks
-
-# 统一错误处理方式
-/batch 将 src/api/ 下的所有 try-catch 替换为统一的 errorHandler 中间件
 ```
-
-`/batch` 会自动：
-1. 分析受影响的文件
-2. 生成 5-30 个独立 Agent
-3. 每个 Agent 在隔离的 git 工作树中工作
-4. 并行执行修改
-5. 汇总结果
 
 ---
 
-## 12. Skill 与其他扩展机制对比
+## 13. Skill 安全注意事项
 
-| 特性 | Skill | Subagent | Hook | MCP | Plugin |
-|------|-------|----------|------|-----|--------|
-| **可复用提示词** | 是 | 是 | - | - | - |
-| **自动化工作流** | 是 | 是 | 是（强） | - | - |
-| **团队共享** | 是 | 是 | 是 | 是 | 是（强） |
-| **接入外部工具** | - | - | 是 | 是（强） | - |
-| **上下文隔离** | 是 | 是（强） | - | - | - |
-| **工具权限限制** | 是 | 是（强） | - | - | - |
-| **事件驱动** | - | - | 是（强） | - | - |
-| **市场分发** | - | - | - | - | 是（强） |
-| **参数化输入** | 是 | - | - | - | - |
-| **定时执行** | 是（/loop） | - | - | - | - |
+### 13.1 核心原则
 
-### 何时选择什么
+> **"Treat third-party skills as untrusted code. Read them before enabling."**
+>
+> 将第三方 Skill 视为不受信的代码。启用前先阅读。
 
-| 需求 | 推荐 |
+### 13.2 安全防护
+
+| 防护 | 说明 |
 |------|------|
-| 可复用的工作流程（审查、文档生成） | **Skill** |
-| 隔离执行大量搜索/分析 | **Subagent**（或 Skill + `context: fork`） |
-| 工具调用前后的自动验证 | **Hook** |
-| 接入外部 API/数据库 | **MCP** |
-| 打包分发整套工具链 | **Plugin**（包含 Skill + Hook + MCP） |
+| **路径校验** | Workspace/extraDirs 的发现机制会验证 realpath 包含关系 |
+| **环境隔离** | `skills.entries.*.env` 和 `apiKey` 只注入主机进程，不进入沙箱 |
+| **沙箱执行** | 对不受信的输入优先使用沙箱运行 |
+| **Session 快照** | Skill 在会话开始时快照，运行中修改不立即生效 |
+
+### 13.3 审查建议
+
+安装第三方 Skill 前：
+1. 阅读 SKILL.md 的全部内容
+2. 检查是否有异常的 Shell 命令
+3. 检查是否访问了不必要的文件/网络
+4. 在沙箱模式下先测试
+5. 检查 awesome-openclaw-skills 中的过滤说明（已移除 373 个恶意 Skill）
 
 ---
 
-## 13. 编写 Skill 的最佳实践
+## 14. Plugin 系统
 
-### 13.1 写清晰、具体的 description
+Plugin 是比 Skill 更大的扩展包，可以同时包含 Skill、渠道和配置。
 
-description 是 Claude 决定何时自动使用 Skill 的依据：
+### 14.1 Plugin 结构
+
+```
+my-plugin/
+├── openclaw.plugin.json       ← 插件描述文件
+├── skills/
+│   ├── skill-a/SKILL.md
+│   └── skill-b/SKILL.md
+└── channels/                   ← 可选，自定义渠道
+```
+
+### 14.2 Plugin 中的 Skill
+
+Plugin 的 `openclaw.plugin.json` 中声明 skills 目录：
+
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "skills": ["skills"]
+}
+```
+
+Plugin 中的 Skill 遵循标准的优先级规则，可以通过 `metadata.openclaw.requires.config` 进行门控。
+
+---
+
+## 15. 高级模式
+
+### 15.1 直接工具分发 (Command Dispatch)
+
+跳过 AI 模型推理，直接调用工具：
+
+```yaml
+---
+name: quick-shell
+description: 直接执行 Shell 命令
+command-dispatch: tool
+command-tool: exec
+command-arg-mode: raw
+---
+```
+
+使用 `/quick-shell ls -la` 直接执行，不经过模型处理。
+
+### 15.2 Agent 自我编写 Skill
+
+OpenClaw 的 Agent 可以自己创建和更新 Skill：
+
+```
+你：帮我写一个管理我的 Todoist 任务的 Skill
+
+Agent：好的，我来创建一个 Todoist Skill...
+（Agent 在 workspace/skills/ 中创建 SKILL.md）
+```
+
+Skill 观察器检测到新文件后自动加载，下次对话即可使用。
+
+### 15.3 Skill 热重载
+
+```json5
+{
+  skills: {
+    // 默认开启，文件变更后自动刷新
+    // 观察器检测 SKILL.md 变化 → 刷新快照
+  }
+}
+```
+
+开发 Skill 时无需重启 Gateway，保存文件即可。
+
+### 15.4 跨节点 Skill
+
+当 Linux Gateway 连接到 macOS 节点时：
+
+```
+Linux Gateway ←→ macOS Node (允许 system.run)
+                     │
+                     ▼
+              macOS-only Skill
+              (如需要 Homebrew 的 Skill)
+```
+
+macOS 专属 Skill 通过 `nodes` 工具在远程节点上执行。
+
+### 15.5 安装配置声明
+
+Skill 可以声明安装方式，让 Gateway 自动安装依赖：
+
+```yaml
+metadata:
+  openclaw:
+    install:
+      - id: "brew"
+        kind: "brew"
+        formula: "ripgrep"
+        bins: ["rg"]
+        label: "通过 Homebrew 安装 ripgrep"
+      - id: "node"
+        kind: "node"
+        package: "@anthropic-ai/sdk"
+        bins: ["anthropic"]
+      - id: "go"
+        kind: "go"
+        module: "github.com/user/tool@latest"
+        bins: ["tool"]
+      - id: "uv"
+        kind: "uv"
+        package: "my-python-tool"
+        bins: ["my-tool"]
+```
+
+支持的安装方式：`brew`、`node`、`go`、`uv`、`download`。
+
+---
+
+## 16. 最佳实践
+
+### 16.1 写好 description
+
+description 是 Agent 判断何时使用 Skill 的核心依据：
 
 ```yaml
 # 不好 - 太模糊
-description: 代码工具
+description: 工具
 
-# 好 - 具体说明何时使用
-description: 生成 REST API 文档和使用示例。用于记录 API 端点、编写 README 章节或解释函数行为时使用。
+# 好 - 明确说明做什么、何时用
+description: 查询 PostgreSQL 数据库，当用户需要查看数据、运行 SQL 或检查表结构时使用
 ```
 
-### 13.2 保持 SKILL.md 简洁
+### 16.2 SKILL.md 保持聚焦
 
-- 主文件控制在 **500 行以内**
-- 详细参考内容移到辅助文件
-- 使用相对链接引用辅助文件
+- 一个 Skill 专注一件事
+- 指令清晰、步骤明确
+- 不超过 500 行（减少 token 开销）
 
-### 13.3 用 allowed-tools 限制权限
+### 16.3 善用门控
 
-不需要修改文件的 Skill，明确限制工具：
+不必要的 Skill 不应加载：
 
 ```yaml
-allowed-tools: Read, Grep, Glob    # 只读
+metadata:
+  openclaw:
+    requires:
+      bins: ["docker"]    # 没有 docker 就不加载
+    os: "linux"           # 只在 Linux 上加载
 ```
 
-### 13.4 为有副作用的 Skill 禁用自动调用
-
-部署、提交等有副作用的操作应禁止自动调用：
+### 16.4 有副作用的操作禁止自动调用
 
 ```yaml
-disable-model-invocation: true
+disable-model-invocation: true  # 部署、删除等危险操作
 ```
 
-### 13.5 善用 argument-hint
+### 16.5 先测试再发布
 
-好的参数提示帮助用户快速理解用法：
+1. 放到 `<workspace>/skills/` 目录
+2. 在对话中测试各种使用场景
+3. 确认无误后再发布到 ClawHub
 
-```yaml
-argument-hint: [文件路径]
-argument-hint: [issue 编号]
-argument-hint: [源框架] [目标框架]
-```
+### 16.6 安全第一
 
-### 13.6 包含使用示例
-
-在辅助文件或 SKILL.md 末尾提供示例：
-
-```markdown
-## 使用示例
-
-- `/my-skill src/auth/` - 审计认证模块
-- `/my-skill src/api/v2/users.ts` - 审计特定文件
-```
-
-### 13.7 标注上下文开销
-
-对于会读取大量文件的 Skill，在 description 中标注：
-
-```yaml
-description: 全代码库分析（约消耗 10k token，建议在新会话中使用）
-```
-
-### 13.8 测试和迭代
-
-```bash
-# 创建或编辑 Skill 后
-/reload-plugins          # 重新加载
-
-# 测试调用
-/my-skill test-arg
-
-# 确认出现在帮助中
-/help
-```
+- 不在 SKILL.md 中硬编码密钥
+- 使用 `skills.entries.*.env` 或 `apiKey` 注入敏感信息
+- 危险操作加上确认步骤
 
 ---
 
-## 14. 参考资源
+## 17. 参考资源
 
 ### 官方文档
 
-| 主题 | 链接 |
+| 资源 | 链接 |
 |------|------|
-| Skill 系统 | https://code.claude.com/docs/en/skills |
-| Hook 指南 | https://code.claude.com/docs/en/hooks-guide |
-| 子 Agent | https://code.claude.com/docs/en/sub-agents |
-| Plugin 系统 | https://code.claude.com/docs/en/plugins |
-| MCP 集成 | https://code.claude.com/docs/en/mcp |
-| 最佳实践 | https://code.claude.com/docs/en/best-practices |
-| Agent SDK | https://platform.claude.com/docs/agents |
+| Skill 官方文档 | https://docs.openclaw.ai/tools/skills |
+| GitHub 主仓库 | https://github.com/openclaw/openclaw |
+| Skill 源码 (docs) | https://github.com/openclaw/openclaw/blob/main/docs/tools/skills.md |
+| ClawHub 注册中心 | https://clawhub.ai |
+| ClawHub 源码 | https://github.com/openclaw/clawhub |
 
 ### 社区资源
 
-| 资源 | 说明 |
+| 资源 | 链接 |
 |------|------|
-| Agent Skills 标准 | https://agentskills.io |
-| Plugin 市场 | Open Claw 内运行 `/plugin` |
-| GitHub 搜索 | 搜索 `claude-code-skill`、`claude-code-plugin` |
-| Claude Code Issues | https://github.com/anthropics/claude-code/issues |
+| awesome-openclaw-skills | https://github.com/VoltAgent/awesome-openclaw-skills |
+| DigitalOcean Skill 指南 | https://www.digitalocean.com/resources/articles/what-are-openclaw-skills |
+| DataCamp ClawHub 最佳 Skill | https://www.datacamp.com/blog/best-clawhub-skills |
+| FindSkill.ai Skill 完整指南 | https://findskill.ai/blog/openclaw-skills-guide/ |
+| LumaDock 自定义 Skill 教程 | https://lumadock.com/tutorials/build-custom-openclaw-skills |
 
-### 快速参考：Skill 文件模板
+### AgentSkills 开放标准
+
+OpenClaw 的 Skill 格式兼容 AgentSkills 开放标准，确保跨工具可移植性。
+
+### Skill 模板
 
 ```yaml
 ---
 name: my-skill
-description: 一句话描述何时使用此 Skill
-argument-hint: [参数说明]
+description: 简短描述功能和使用场景
+user-invocable: true
 disable-model-invocation: false
-allowed-tools: Read, Grep, Glob, Bash, Edit, Write
-model: sonnet
-effort: high
-context: fork
-agent: Explore
+metadata:
+  openclaw:
+    requires:
+      bins: []
+      env: []
+    os: null
+    emoji: null
+    primaryEnv: null
 ---
 
 # Skill 名称
 
-## 任务说明
-描述 Claude 应该做什么...
+## 功能说明
+描述 Skill 的功能...
 
-## 步骤
-1. 第一步
-2. 第二步
-3. 第三步
+## 使用步骤
+1. 步骤一
+2. 步骤二
+3. 步骤三
 
-## 约束
-- 约束条件...
-
-## 输出格式
-- 期望的输出格式...
+## 注意事项
+- 安全约束
+- 边界条件
 ```
